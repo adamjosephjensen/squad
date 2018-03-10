@@ -187,6 +187,7 @@ class QAModel(object):
                               tf.float32)
         concat = tf.concat(heads, axis=1)
         out = tf.matmul(concat, W_O)
+        return out
 
 
     def fully_connected_layers(inputs, n_out, n_layers, act_fn=tf.nn.leaky_relu):
