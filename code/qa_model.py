@@ -248,9 +248,9 @@ class QAModel(object):
         with tf.variable_scope("decoder"):
             # TODO: consider addng query to context attn since that is what the
             # baseline model seems to do
-            # query_to_context = #shape (weighted sum of question, based on
-            # context)
-
+            # (weighted sum of question, based on context)
+            # question_hiddens = transformer(context_hiddens, context_hiddens, question_hiddens)
+            # (batch_size, question_len, embedding_size)
             # weighted sum of context, based on question
             blended_reps = transformer(question_hiddens,
                                            question_hiddens,
