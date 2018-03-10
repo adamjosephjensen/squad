@@ -52,6 +52,9 @@ tf.app.flags.DEFINE_integer("hidden_size", 200, "Size of the hidden states")
 tf.app.flags.DEFINE_integer("context_len", 600, "The maximum context length of your model")
 tf.app.flags.DEFINE_integer("question_len", 30, "The maximum question length of your model")
 tf.app.flags.DEFINE_integer("embedding_size", 100, "Size of the pretrained word vectors. This needs to be one of the available GloVe dimensions: 50/100/200/300")
+# Transformer Network Hparams
+tf.app.flags.DEFINE_integer("n_blocks", 2, "number of transformer blocks")
+tf.app.flags.DEFINE_integer("n_heads", 8, "number of heads for attention")
 
 # How often to print, save, eval
 tf.app.flags.DEFINE_integer("print_every", 1, "How many iterations to do per print.")

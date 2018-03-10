@@ -116,6 +116,148 @@ class QAModel(object):
             self.qn_embs = embedding_ops.embedding_lookup(embedding_matrix, self.qn_ids) # shape (batch_size, question_len, embedding_size)
 
 
+    def layer_norm(inputs):
+        """
+        Make layer have mean 0 and variance 1.
+        Adds two more trainable parameters
+        """
+        mean, var = tf.nn.moments(x, axes=1)
+        std = tf.sqrt(var)
+        g = tf.get_variable("layer_norm_gain", tf.shape(std))
+        b = tf.get_variable("layer_norm_bias", tf.shape(mean))
+        h = tf.nn.leaky_relu((gain / std) * (inputs - mean) + b)
+        return h
+
+    def dotprod_attn(queries, keys, values):
+        """
+        [|Q| x d_k] x [d_k x |K|] x [|K| x d_v] = [|Q| x d_v]
+        A(Q, K, V) = softmax(Q K.T / sqrt(d_k)) V
+        """
+        num = tf.matmul(queries, tf.transpose(keys))
+        d_k = tf.shape(keys)[1]
+        denom = tf.sqrt(d_k)
+        sm = tf.nn.softmax(num / denom)
+        return tf.matmul(sm, values)
+
+
+    def multi_head_attention(queries, keys, values, num_heads):
+        d_k = tf.shape(queries)[1] / self.FLAGS.n_heads
+        last_d_k = lower + tf.shape(queries)[1] % self.FLAGS.n_heads
+        
+        d_v = tf.shape(values)[1] / self.FLAGS.n_head
+        last_d_v = d_v + tf.shape(values)[1] % self.FLAGS.n_heads
+
+        heads = []
+        # all but the last head
+        for i in range(self.FLAGS.n_heads - 1):
+            W_i_Q = tf.get_variable("W_{}_Q".format(i),
+                                    (tf.shape(queries)[1], d_k),
+                                    tf.float32)
+            W_i_K = tf.get_variable("W_{}_K".format(i),
+                                    (tf.shape(keys)[1], d_k),
+                                    tf.float32)
+            W_i_V = tf.get_variable("W_{}_V".format(i),
+                                    (tf.shape(values)[1], d_v),
+                                    tf.flat32)
+            q_i = tf.matmul(queries, W_i_Q)
+            k_i = tf.matmul(keys, W_i_K)
+            v_i = tf.matmul(values, W_i_V)
+            head_i = dotprod_attn(q_i, k_i, v_i)
+            heads.append(head_i)
+
+        ln = self.FLAGS.n_heads - 1
+        W_last_Q = tf.get_variable("W_{}_Q".format(ln),
+                                    (tf.shape(queries)[1], last_d_k),
+                                    tf.float32)
+        W_last_K = tf.get_variable("W_{}_K".format(ln),
+                                (tf.shape(keys)[1], last_d_k),
+                                tf.float32)
+        W_last_V = tf.get_variable("W_{}_V".format(ln),
+                                (tf.shape(values)[1], last_d_v),
+                                tf.flat32)
+        q_last = tf.matmul(queries, W_last_Q)
+        k_last = tf.matmul(keys, W_last_K)
+        v_last = tf.matmul(values, W_last_V)
+        head_last = dotprod_attn(q_last, k_last, v_last)
+        heads.append(head_last)
+
+        W_O = tf.get_variable("W_O",
+                              (tf.shape(queries)[0],
+                               tf.shape(values)[1]),
+                              tf.float32)
+        concat = tf.concat(heads, axis=1)
+        out = tf.matmul(concat, W_O)
+
+
+    def fully_connected_layers(inputs, n_out, n_layers, act_fn=tf.nn.leaky_relu):
+        for _ in range(n_layers):
+            inputs = tf.contrib.layers.fully_connected(
+                    inputs=inputs,
+                    num_outputs=n_out,
+                    activation_fn=act_fn)
+
+        return inputs
+
+
+    def transformer_encoder_block(to_encode, scope, use=tf.AUTO_REUSE):
+        residual = to_encode
+        for i in range(self.FLAGS.n_blocks):
+            
+            # TODO: make sure scopes and reuse are Ok. Maybe don't worry abt
+            # until there are issues.
+
+            # multi-head attention
+            attn = multihead_attention(queries=residual,
+                                            keys=residual,
+                                            values=residual,
+                                            num_heads=self.FLAGS.n_heads)
+            # dropout, add, and norm
+            sub1 = tf.nn.dropout(attn, self.FLAGS.dropout)
+            
+        nor1 = layer_norm(residual + attn)
+            # feed forward twice, without changing shape
+            flat = tf.flatten(nor1)
+            n_out = tf.shape(flat)[1]
+            fc = fully_connected_layers(flat, n_out, 2)
+            reshaped = tf.reshape(fc, tf.shape(nor1))
+            # dropout, add, and norm
+            sub2 = tf.nn.dropout(reshaped, self.FLAGS.dropout)
+            nor2 = layer_norm(nor1 + sub2)
+
+            # add residual
+            residual = nor2
+
+
+    def build_transformer_b_graph(self):
+        # TODO: embed positions in context
+        # TODO: embed positions in query
+
+        #context_hiddens = #encode context
+        #question_hiddens = #encode questions
+
+        #context_to_query = #shape
+        #query_to_context = #shape
+    
+        # new weights for model encoder layer, but also a transformer network
+        # input is [c, a, c * a, c * b]
+        # output is (batch_size, context_len, hidden_size)
+
+        return blended_reps_final # shape (batch_size, context_len, hidden_size)
+
+    def blended_to_output(self, blended_reps_final):
+        # Use softmax layer to compute probability distribution for start location
+        # Note this produces self.logits_start and self.probdist_start, both of which have shape (batch_size, context_len)
+        with vs.variable_scope("StartDist"):
+            softmax_layer_start = SimpleSoftmaxLayer()
+            self.logits_start, self.probdist_start = softmax_layer_start.build_graph(blended_reps_final, self.context_mask)
+
+        # Use softmax layer to compute probability distribution for end location
+        # Note this produces self.logits_end and self.probdist_end, both of which have shape (batch_size, context_len)
+        with vs.variable_scope("EndDist"):
+            softmax_layer_end = SimpleSoftmaxLayer()
+            self.logits_end, self.probdist_end = softmax_layer_end.build_graph(blended_reps_final, self.context_mask)
+
+
     def build_graph(self):
         """Builds the main part of the graph for the model, starting from the input embeddings to the final distributions for the answer span.
 
@@ -481,7 +623,8 @@ class QAModel(object):
                         'epoch %d, iter %d, loss %.5f, smoothed loss %.5f, grad norm %.5f, param norm %.5f, batch time %.3f' %
                         (epoch, global_step, loss, exp_loss, grad_norm, param_norm, iter_time))
 
-                # Sometimes save model
+
+# Sometimes save model
                 if global_step % self.FLAGS.save_every == 0:
                     logging.info("Saving to %s..." % checkpoint_path)
                     self.saver.save(session, checkpoint_path, global_step=global_step)
