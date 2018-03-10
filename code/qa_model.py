@@ -128,6 +128,7 @@ class QAModel(object):
         h = tf.nn.leaky_relu((gain / std) * (inputs - mean) + b)
         return h
 
+
     def dotprod_attn(queries, keys, values):
         """
         [|Q| x d_k] x [d_k x |K|] x [|K| x d_v] = [|Q| x d_v]
@@ -200,54 +201,71 @@ class QAModel(object):
         return inputs
 
 
-    def transformer_encoder_block(to_encode, scope, use=tf.AUTO_REUSE):
-        residual = to_encode
+    def transformer(q, k, v):
+    # TODO: account for the mask
         for i in range(self.FLAGS.n_blocks):
+            with tf.variable_scope("block_{}".format(i)):
+                # multi-head attention
+                attn = multihead_attention(queries=q,
+                                                keys=k,
+                                                values=v,
+                                                num_heads=self.FLAGS.n_heads)
+                # dropout, add, and norm
+                attn = tf.nn.dropout(attn, self.FLAGS.dropout)
+                nor1 = layer_norm(attn + q)
+
+                # feed forward twice, without changing shape
+                flat = tf.flatten(nor1)
+                n_out = tf.shape(flat)[1]
+                flat = fully_connected_layers(flat, n_out, 2)
+                reshaped = tf.reshape(flat, tf.shape(nor1))
+
+                # dropout, add, and norm
+                sub2 = tf.nn.dropout(reshaped, self.FLAGS.dropout)
+                nor2 = layer_norm(sub2 + nor1)
+
+                # NOTE: adding this second skip connection is not standard
+                q = layer_norm(nor2 + q)
+
+
+    def build_transformer_blended(self,
+                                  context_embs,
+                                  context_mask,
+                                  qn_embs,
+                                  qn_mask
+                                 ):
+        # TODO: embed positions in context, and query
+
+        scope = "shared_encoder"
+        with tf.variable_scope(scope) as scope:
+            # TODO: put in mask
+            c = context_embs
+            q = qn_embs
+            context_hiddens = transformer(c, c, c) # (batch_size, context_len, embedding_size)
+            scope.reuse_variables()
+            question_hiddens = transformer(q, q, q) # (batch_size, question_len, embedding_size)
             
-            # TODO: make sure scopes and reuse are Ok. Maybe don't worry abt
-            # until there are issues.
+        with tf.variable_scope("decoder"):
+            # TODO: consider addng query to context attn since that is what the
+            # baseline model seems to do
+            # query_to_context = #shape (weighted sum of question, based on
+            # context)
 
-            # multi-head attention
-            attn = multihead_attention(queries=residual,
-                                            keys=residual,
-                                            values=residual,
-                                            num_heads=self.FLAGS.n_heads)
-            # dropout, add, and norm
-            sub1 = tf.nn.dropout(attn, self.FLAGS.dropout)
+            # weighted sum of context, based on question
+            blended_reps = transformer(question_hiddens,
+                                           question_hiddens,
+                                           context_hiddens) # (batch_size, context_len, embedding_size)
+
+            # blended_reps = tf.concat([context_hiddens, context_to_query], axis=2) # (batch_size, context_len, hidden_size*4)
+            blended_reps_final = tf.contrib.layers.fully_connected(blended_reps, num_outputs=self.FLAGS.hidden_size) # blended_reps_final is shape (batch_size, context_len, hidden_size)
             
-        nor1 = layer_norm(residual + attn)
-            # feed forward twice, without changing shape
-            flat = tf.flatten(nor1)
-            n_out = tf.shape(flat)[1]
-            fc = fully_connected_layers(flat, n_out, 2)
-            reshaped = tf.reshape(fc, tf.shape(nor1))
-            # dropout, add, and norm
-            sub2 = tf.nn.dropout(reshaped, self.FLAGS.dropout)
-            nor2 = layer_norm(nor1 + sub2)
-
-            # add residual
-            residual = nor2
-
-
-    def build_transformer_b_graph(self):
-        # TODO: embed positions in context
-        # TODO: embed positions in query
-
-        #context_hiddens = #encode context
-        #question_hiddens = #encode questions
-
-        #context_to_query = #shape
-        #query_to_context = #shape
-    
-        # new weights for model encoder layer, but also a transformer network
-        # input is [c, a, c * a, c * b]
-        # output is (batch_size, context_len, hidden_size)
-
         return blended_reps_final # shape (batch_size, context_len, hidden_size)
 
     def blended_to_output(self, blended_reps_final):
-        # Use softmax layer to compute probability distribution for start location
-        # Note this produces self.logits_start and self.probdist_start, both of which have shape (batch_size, context_len)
+        """
+        Use softmax layer to compute probability distribution for start location
+        Note this produces self.logits_start and self.probdist_start, both of which have shape (batch_size, context_len)
+        """
         with vs.variable_scope("StartDist"):
             softmax_layer_start = SimpleSoftmaxLayer()
             self.logits_start, self.probdist_start = softmax_layer_start.build_graph(blended_reps_final, self.context_mask)
