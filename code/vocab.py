@@ -20,6 +20,8 @@ from __future__ import division
 
 from tqdm import tqdm
 import numpy as np
+import pickle
+from os.path import isfile
 
 _PAD = b"<pad>"
 _UNK = b"<unk>"
@@ -45,40 +47,51 @@ def get_glove(glove_path, glove_dim):
     """
 
     print "Loading GLoVE vectors from file: %s" % glove_path
-    vocab_size = int(4e5) # this is the vocab size of the corpus we've downloaded
 
-    emb_matrix = np.zeros((vocab_size + len(_START_VOCAB), glove_dim))
-    word2id = {}
-    id2word = {}
+    if not isfile("emb_matrix.p"):
+        vocab_size = int(4e5) # this is the vocab size of the corpus we've downloaded
 
-    random_init = True
-    # randomly initialize the special tokens
-    if random_init:
-        emb_matrix[:len(_START_VOCAB), :] = np.random.randn(len(_START_VOCAB), glove_dim)
+        emb_matrix = np.zeros((vocab_size + len(_START_VOCAB), glove_dim))
+        word2id = {}
+        id2word = {}
 
-    # put start tokens in the dictionaries
-    idx = 0
-    for word in _START_VOCAB:
-        word2id[word] = idx
-        id2word[idx] = word
-        idx += 1
+        random_init = True
+        # randomly initialize the special tokens
+        if random_init:
+            emb_matrix[:len(_START_VOCAB), :] = np.random.randn(len(_START_VOCAB), glove_dim)
 
-    # go through glove vecs
-    with open(glove_path, 'r') as fh:
-        for line in tqdm(fh, total=vocab_size):
-            line = line.lstrip().rstrip().split(" ")
-            word = line[0]
-            vector = list(map(float, line[1:]))
-            if glove_dim != len(vector):
-                raise Exception("You set --glove_path=%s but --embedding_size=%i. If you set --glove_path yourself then make sure that --embedding_size matches!" % (glove_path, glove_dim))
-            emb_matrix[idx, :] = vector
+        # put start tokens in the dictionaries
+        idx = 0
+        for word in _START_VOCAB:
             word2id[word] = idx
             id2word[idx] = word
             idx += 1
 
-    final_vocab_size = vocab_size + len(_START_VOCAB)
-    assert len(word2id) == final_vocab_size
-    assert len(id2word) == final_vocab_size
-    assert idx == final_vocab_size
+        # go through glove vecs
+        with open(glove_path, 'r') as fh:
+            for line in tqdm(fh, total=vocab_size):
+                line = line.lstrip().rstrip().split(" ")
+                word = line[0]
+                vector = list(map(float, line[1:]))
+                if glove_dim != len(vector):
+                    raise Exception("You set --glove_path=%s but --embedding_size=%i. If you set --glove_path yourself then make sure that --embedding_size matches!" % (glove_path, glove_dim))
+                emb_matrix[idx, :] = vector
+                word2id[word] = idx
+                id2word[idx] = word
+                idx += 1
+        final_vocab_size = vocab_size + len(_START_VOCAB)
+        assert len(word2id) == final_vocab_size
+        assert len(id2word) == final_vocab_size
+        assert idx == final_vocab_size
+
+        l = [emb_matrix, word2id, id2word]
+        pickle.dump(l, open("emb_matrix.p", "wb+"))
+        print("dumped vocabulary pickle")
+    else:
+        print("loading vocabulary pickle")
+        l = pickle.load( open("emb_matrix.p", "rb"))
+        emb_matrix, word2id, id2word = l
+        print("vocabulary pickle loaded!")
+
 
     return emb_matrix, word2id, id2word
