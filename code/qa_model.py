@@ -156,12 +156,14 @@ class QATransformerModel(object):
             # but tensorflow does not support this
 
 
-            attn_dist = tf.nn.softmax(QKT_logits, name='attention_weights');
-            # NOTE google's implementation in tensor2tensor applies dropout to these weights
-            attn_dist = tf.nn.dropout(attn_dist, self.FLAGS.dropout)
+            attn_dist = tf.nn.softmax(QKT_logits,
+                                      name='attention_distribution')
             # returns: [batch, heads, length_q, depth_v]
             out = tf.matmul(attention_dist, v)
             return out
+
+            # NOTE google's implementation in tensor2tensor applies dropout to these weights
+            # attn_dist = tf.nn.dropout(attn_dist, self.FLAGS.dropout)
             #i = tf.constant(0)
             #while_condition = lambda i: tf.less(i, self.FLAGS.question_len)
             #def loop_over_invalid_Q(x):
