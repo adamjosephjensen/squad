@@ -174,7 +174,7 @@ class QATransformerModel(object):
 
     def split_last_dim(self, x, n):
         print(x, 'x in split_last_dim')
-        shape = self.shape_list(x)
+        x_shape = self.shape_list(x)
         m = shape[-1]
         if isinstance(m, int) and isinstance(n, int):
             print('m:', m, 'n:', n)
