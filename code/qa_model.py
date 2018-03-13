@@ -122,19 +122,9 @@ class QATransformerModel(object):
             self.qn_embs = embedding_ops.embedding_lookup(embedding_matrix, self.qn_ids) # shape (batch_size, question_len, embedding_size)
 
 
-    def layer_norm(self, x, x_size):
-        """
-        Make layer have mean 0 and variance 1.
-        Adds two more trainable parameters
-        """
-        mean, var = tf.nn.moments(x, axes=1)
-        std = tf.sqrt(var)
-        g = tf.get_variable("layer_norm_gain", x_size)
-        b = tf.get_variable("layer_norm_bias", x_size)
-        h = tf.nn.leaky_relu((g / std) * (x - mean) + b)
-        return h
+  
 
-
+#### your code here ####
     def dotprod_attn(self, q, k, v):
         """
         [|Q| x d_k] x [d_k x |K|] x [|K| x d_v] = [|Q| x d_v]
@@ -143,32 +133,73 @@ class QATransformerModel(object):
         q: a Tensor with shape [batch, heads, length_q, depth_k]
         k: a Tensor with shape [batch, heads, length_kv, depth_k]
         v: a Tensor with shape [batch, heads, length_kv, depth_v]
-
+        
+        returns: [batch, heads, length_q, depth_v]
         """
+        print(q, k, v, 'dotprod in')
         d_k = tf.shape(k)[-1]
-        QKT = tf.matmul(q, k, transpose_b=True) / tf.sqrt(d_k)
+        # QKT is [batch, heads, length_q, length_kv, heads, batch]
+        QKT = tf.matmul(q, k, transpose_b=True) / tf.sqrt(tf.cast(d_k,
+                                                                  tf.float32)) # rank 6
         weights = tf.nn.softmax(QKT, name='attention_weights');
         # NOTE google's implementation applies dropout to these weights
         weights = tf.nn.dropout(weights, self.FLAGS.dropout)
-        return tf.matmul(weights, v)
+        # returns: [batch, heads, length_q, depth_v]
+        out = tf.matmul(weights, v)
+        print(out, 'dotprod out')
+        return out
 
-    
-    def split_last_dim(self, x, n):
+    def shape_list(self, x):
+        """
+        taken from tensor2tensor github
+        
+        Return list of dims, statically where possible."""
+        x = tf.convert_to_tensor(x)
+
+        # If unknown rank, return dynamic shape
+        if x.get_shape().dims is None:
+            return tf.shape(x)
+
+        static = x.get_shape().as_list()
         shape = tf.shape(x)
+
+        ret = []
+        for i in xrange(len(static)):
+            dim = static[i]
+            if dim is None:
+               dim = shape[i]
+            ret.append(dim)
+        return ret
+
+
+    def split_last_dim(self, x, n):
+        print(x, 'x in split_last_dim')
+        shape = self.shape_list(x)
         m = shape[-1]
-        tf.reshape(x, shape[:-1] + [n, m // n])
+        out = tf.reshape(x, shape[:-1] + [n, m // n])
+        print(out, 'o in split_last_dim')
+        return out
 
     
-    def split_heads(self, x, n_heads):
+    def split_heads(self, x, n_heads=None):
+        if n_heads == None:
+            n_heads = self.FLAGS.n_heads
+        print(x, 'x in split-heads')
         # split the last dimension and transpose
-        tf.transpose(self.split_last_dim(x, n_heads), [0, 2, 1, 3])
+        split = self.split_last_dim(x, n_heads)
+        out = tf.transpose(split, [0, 2, 1, 3])
+        return out
 
 
     def combine_heads(self, x):
         # assumes x is rank 4
+        print(x, 'x in combt-heads')
         x = tf.transpose(x, [0, 2, 1, 3])
-        s = tf.shape(x)
-        return tf.reshape(x, s[0:2] + [-1])
+        x_shape = self.shape_list(x)
+        a, b = x_shape[-2:]
+        out = tf.reshape(x, x_shape[0:2] + [a * b])
+        print('out in combine_hds', out)
+        return out
 
     
     def compute(inputs, output_depth, name):
@@ -181,23 +212,19 @@ class QATransformerModel(object):
         return tf.layers.dense(inputs,
                                output_depth,
                                use_bias=False,
+                               activation=None,
                                name=name)
 
 
     def multihead_attention(self, query_antecedent, memory_antecedent,
                             total_key_depth, total_value_depth, output_depth):
-        """
-        Multihead_attention expects Rank 3 tensors
-
-        The return shape is the same shape as val_shape
-        """
         q = compute(query_antecedent, total_key_depth, 'learn_q')
         k = compute(memory_antecedent, total_key_depth, 'learn_k')
         v = compute(memory_antecedent, total_value_depth, 'learn_v')
 
-        q = split_heads(queries)
-        k = split_heads(keys)
-        v = split_heads(values)
+        q = split_heads(q)
+        k = split_heads(k)
+        v = split_heads(v)
 
         x = self.dotprod_attn(q, k, v)
 
@@ -206,49 +233,55 @@ class QATransformerModel(object):
         return x
         
 
-
-    def transformer_block(self, q, qs, k, ks, v, vs, skip=True):
+    def transformer_block(self, query_antecedent, memory_antecedent,
+                            total_key_depth, total_value_depth, output_depth):
         """
-        side effect: makes variable scope reuse variables
+        # returns [batch, query_antecedent_length, output_depth]
         """
-        # TODO: account for the mask
-        # multi-head attention
-        attn = self.multihead_attention(queries=q,
-                                        q_shape=qs,
-                                        keys=k,
-                                        k_shape=ks,
-                                        values=v,
-                                        v_shape=vs,
-                                        n_heads=self.FLAGS.n_heads)
+        # TODO: maybe account for the mask?
+        # returns [batch, query_antecedent_length, output_depth]
+        attn = self.multihead_attention(query_antecedent,
+                                        memory_antecedent,
+                                        total_key_depth,
+                                        total_value_depth,
+                                        output_depth)
         # dropout, add, and norm
+        # query_antecedent might not have come in with depth == output_depth
+        # but if so we add a skip connection
         attn = tf.nn.dropout(attn, self.FLAGS.dropout)
-        # This if statement is shitty.  I would like to trace through multihead
-        # and these loops and get clear on what I actually want to have happen
-        if skip:
-            nor1 = self.layer_norm(attn + q, vs[1])
+        if tf.shape(query_antecedent)[2] == tf.shape(attn)[2]:
+            nor1 = tf.contrib.layers.layer_norm(attn + query_antecedent,
+                                            activation_fn=tf.nn.leaky_relu)
         else:
-            nor1 = self.layer_norm(attn, vs[1])
+            nor1 = tf.contrib.layers.layer_norm(attn,
+                                                activation_fn=tf.nn.leaky_relu)
 
         # feed forward twice, without changing shape
-        fc = tf.contrib.layers.fully_connected(nor1,
-                                                 num_outputs=vs[1],
-                                                 activation_fn=tf.nn.leaky_relu)
-        fc = tf.contrib.layers.fully_connected(nor1,
-                                                 num_outputs=vs[1],
-                                                 activation_fn=tf.nn.leaky_relu)
+        fc = tf.layers.dense(nor1,
+                                     output_depth,
+                                     activation=tf.nn.leaky_relu)
+        fc = tf.layers.dense(fc,
+                                      output_depth,
+                                      activation=None)
         # dropout, add, and norm
         sub2 = tf.nn.dropout(fc, self.FLAGS.dropout)
-
-        # NOTE: I'm not super sure re-use is a good idea here
-        tf.get_variable_scope().reuse_variables()
-        nor2 = self.layer_norm(sub2 + nor1, vs[1])
-        # NOTE: adding this second skip connection is not standard
-        #nor2 = self.layer_norm(nor2 + q, vs[1])
+        nor2 = tf.contrib.layers.layer_norm(sub2 + nor1,
+                                            activation_fn=tf.nn.leaky_relu)
+        # NOTE: adding a second skip connection here is not standard but it
+        # might be fun
+        # if tf.shape(query_antecedent)[2] == tf.shape(nor2)[2]:
+            # nor2 = tf.contrib.layers.layer_norm(nor2 + query_antecedent,
+            #                                     activation_fn=tf.nn.leaky_relu)
         return nor2
 
 
-    def transformer_enc_block(self, x, xs):
-        return self.transformer_block(x, xs, x, xs, x, xs)
+    def transformer_enc_block(self,
+                              query_antecedent,
+                              total_key_depth,
+                              output_depth):
+        return self.transformer_block(query_antecedent, query_antecedent,
+                                      total_key_depth, total_key_depth,
+                                      output_depth)
 
 
     def build_transformer_b(self,
@@ -258,42 +291,45 @@ class QATransformerModel(object):
                                   qn_mask
                                  ):
         # TODO: embed positions in context, and query
+        hidden_size = self.FLAGS.hidden_size
+        embedding_size = self.FLAGS.embedding_size
         with tf.variable_scope("context_encoder"):
-            # TODO: put in mask
-            c = tf.contrib.layers.flatten(context_embs)
-            cs = (None, self.FLAGS.context_len * self.FLAGS.embedding_size)
+            # TODO: put in mask, maybe?
             for i in range(self.FLAGS.n_blocks):
                 with tf.variable_scope("block_{}".format(i)) as scope:
-                    c = self.transformer_enc_block(c, cs)
+                    c = self.transformer_enc_block(context_embs,
+                                                   embedding_size,
+                                                   hidden_size)
         with tf.variable_scope("question_encoder"):
-            q = tf.contrib.layers.flatten(qn_embs)
-            qs = (None, self.FLAGS.question_len * self.FLAGS.embedding_size)
             for i in range(self.FLAGS.n_blocks):
                 with tf.variable_scope("block_{}".format(i)) as scope:
-                    q = self.transformer_enc_block(q, qs)
+                    q = self.transformer_enc_block(qn_embs,
+                                                   embedding_size,
+                                                   hidden_size)
         # encoder-decoder attention where queries come from previous layer and
         # keys and values come from the encoder output
         with tf.variable_scope("context_attends_to_question"):
             for i in range(self.FLAGS.n_blocks):
-                prev = q
+                attended_q = q
                 with tf.variable_scope("block_{}".format(i)) as scope:
-                    # TODO the shape on the first add is fucking up
-                    prev = self.transformer_block(prev, qs, c, cs, q, qs,
-                                                  not (i == 0))
+                    attended_q = self.transformer_block(attended_q,
+                                                        c,
+                                                        hidden_size,
+                                                        hidden_size,
+                                                        hidden_size)
         with tf.variable_scope("question_attends_to_context"):
             # weighted sum of context, based on question representation
             for i in range(self.FLAGS.n_blocks):
                 with tf.variable_scope("block_{}".format(i)) as scope:
-                    # might break
-                    prev = self.transformer_block(prev, qs, q, qs, c, cs,
-                                                 not (i == 0))
+                    c = self.transformer_block(c,
+                                               attended_q,
+                                               hidden_size,
+                                               hidden_size,
+                                               hidden_size)
         
-        blended_reps = tf.contrib.layers.fully_connected(blended_reps,
-                                     num_outputs=self.FLAGS.hidden_size)
-        blended_reps_final = tf.reshape(blended_reps,
-                                            self.FLAGS.context_len,
-                                            self.FLAGS.hidden_size)
-        self.blended_to_output(blended_reps_final)
+        blended_reps = tf.contrib.layers.dense(c, hidden_size,
+                                               tf.nn.leaky_relu)
+        self.blended_to_output(blended_reps)
 
 
     def blended_to_output(self, blended_reps_final):
