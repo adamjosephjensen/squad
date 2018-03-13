@@ -176,7 +176,10 @@ class QATransformerModel(object):
         print(x, 'x in split_last_dim')
         shape = self.shape_list(x)
         m = shape[-1]
-        out = tf.reshape(x, shape[:-1] + [n, m // n])
+        if isinstance(m, int) and isinstance(n, int):
+            print('m:', m, 'n:', n)
+            assert m % n == 0
+        out = tf.reshape(x, x_shape[:-1] + [n, m // n])
         print(out, 'o in split_last_dim')
         return out
 
@@ -202,7 +205,7 @@ class QATransformerModel(object):
         return out
 
     
-    def compute(inputs, output_depth, name):
+    def compute(self, inputs, output_depth, name):
         """
         Output tensor the same shape as inputs except the last dimension is
         output_depth.
@@ -218,13 +221,13 @@ class QATransformerModel(object):
 
     def multihead_attention(self, query_antecedent, memory_antecedent,
                             total_key_depth, total_value_depth, output_depth):
-        q = compute(query_antecedent, total_key_depth, 'learn_q')
-        k = compute(memory_antecedent, total_key_depth, 'learn_k')
-        v = compute(memory_antecedent, total_value_depth, 'learn_v')
+        q = self.compute(query_antecedent, total_key_depth, 'learn_q')
+        k = self.compute(memory_antecedent, total_key_depth, 'learn_k')
+        v = self.compute(memory_antecedent, total_value_depth, 'learn_v')
 
-        q = split_heads(q)
-        k = split_heads(k)
-        v = split_heads(v)
+        q = self.split_heads(q)
+        k = self.split_heads(k)
+        v = self.split_heads(v)
 
         x = self.dotprod_attn(q, k, v)
 
@@ -290,21 +293,23 @@ class QATransformerModel(object):
                                   qn_embs,
                                   qn_mask
                                  ):
-        # TODO: embed positions in context, and query
+        # BIG TODO make embedding re-size happen BEFORE mask creation
         hidden_size = self.FLAGS.hidden_size
-        embedding_size = self.FLAGS.embedding_size
+        context_embs = self.compute(context_embs, hidden_size, 'size_context')
+        qn_embs = self.compute(context_embs, hidden_size, 'size_qn')
+        # TODO: embed positions in context, and query
         with tf.variable_scope("context_encoder"):
             # TODO: put in mask, maybe?
             for i in range(self.FLAGS.n_blocks):
                 with tf.variable_scope("block_{}".format(i)) as scope:
                     c = self.transformer_enc_block(context_embs,
-                                                   embedding_size,
+                                                   hidden_size,
                                                    hidden_size)
         with tf.variable_scope("question_encoder"):
             for i in range(self.FLAGS.n_blocks):
                 with tf.variable_scope("block_{}".format(i)) as scope:
                     q = self.transformer_enc_block(qn_embs,
-                                                   embedding_size,
+                                                   hidden_size,
                                                    hidden_size)
         # encoder-decoder attention where queries come from previous layer and
         # keys and values come from the encoder output
@@ -327,7 +332,7 @@ class QATransformerModel(object):
                                                hidden_size,
                                                hidden_size)
         
-        blended_reps = tf.contrib.layers.dense(c, hidden_size,
+        blended_reps = tf.layers.dense(c, hidden_size,
                                                tf.nn.leaky_relu)
         self.blended_to_output(blended_reps)
 
