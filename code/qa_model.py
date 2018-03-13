@@ -122,45 +122,54 @@ class QATransformerModel(object):
             self.qn_embs = embedding_ops.embedding_lookup(embedding_matrix, self.qn_ids) # shape (batch_size, question_len, embedding_size)
 
 
-  
-
-#### your code here ####
-    def dotprod_attn(self, q, k, v):
+    #### your code here ####
+    def dotprod_attn(self, q, q_padding, k, k_padding, v):
         """
         [|Q| x d_k] x [d_k x |K|] x [|K| x d_v] = [|Q| x d_v]
         A(Q, K, V) = softmax(Q K.T / sqrt(d_k)) V
 
         q: a Tensor with shape [batch, heads, length_q, depth_k]
+        q_padding: [batch, length_q]
         k: a Tensor with shape [batch, heads, length_kv, depth_k]
+        k_padding: [batch, length_k]
         v: a Tensor with shape [batch, heads, length_kv, depth_v]
         
         returns: [batch, heads, length_q, depth_v]
         """
-        with tf.variable_scope(name, default_name="dot_product_attention",
-                               values=[q, k, v]) as scope:
-            print(q, k, v, 'dotprod in')
+        with tf.variable_scope("dot_product_attention") as scope:
+            #print(q, k, v, 'dotprod in')
             d_k = tf.shape(k)[-1]
             # QKT is [batch, heads, length_q, length_kv, heads, batch]
             QKT_logits = tf.matmul(q, k, transpose_b=True)
             QKT_logits = QKT_logits / tf.sqrt(tf.cast(d_k, tf.float32)) # rank 6
             
-            # q_padding will be [batch, heads, length_q]
-            valid_Qs = tf.reduce_sum(q_padding, axis=2)
+            # q_padding will be [batch, length_q]
+            valid_Qs = tf.reduce_sum(q_padding, axis=-1)
             # num valid key tokens per key index
-            valid_Ks = tf.reduce_sum(k_padding, axis=2)
+            valid_Ks = tf.reduce_sum(k_padding, axis=-1)
 
             # make the part of the logits based on padded query or key == min.
             # That way, softmax will put no probability mass on them
-            QKT_logits[:, :, valid_Qs:, :, :, :] += (-1e30)
-            QKT_logits[:, :, :, valid_Ks:, :, :] = tf.reduce_min(QKT_logits)
-        
+            # ideally this would be:
+            # QKT_logits[:, :, valid_Qs:, :, :, :] -= 1e30
+            # there might be other ways to do this besides reduce_min
+            # QKT_logits[:, :, :valid_Qs, valid_Ks:, :, :] -= 1e30
+            i = tf.constant(0)
+            while_condition = lambda i: tf.less(i, self.FLAGS.question_len)
+            def loop_over_invalid_Q(x):
+                # this seems shitty.  rather, i don't really know how to use it
+                # yet
+                return [tf.add(i, 1)]
+
+            r = tf.while_loop(while_condition, loop_over_invalid_Q, [i])
+
             attn_dist = tf.nn.softmax(QKT_logits, name='attention_weights');
             
             # NOTE google's implementation applies dropout to these weights
             attn_dist = tf.nn.dropout(attn_dist, self.FLAGS.dropout)
             # returns: [batch, heads, length_q, depth_v]
             out = tf.matmul(attention_dist, v)
-            print(out, 'dotprod out')
+            #print(out, 'dotprod out')
             return out
 
     def shape_list(self, x):
@@ -187,21 +196,20 @@ class QATransformerModel(object):
 
 
     def split_last_dim(self, x, n):
-        print(x, 'x in split_last_dim')
+        print('split last dim in', x, 'n', n)
         x_shape = self.shape_list(x)
         m = x_shape[-1]
         if isinstance(m, int) and isinstance(n, int):
             print('m:', m, 'n:', n)
             assert m % n == 0
         out = tf.reshape(x, x_shape[:-1] + [n, m // n])
-        print(out, 'o in split_last_dim')
+        print('split last dim out:', out)
         return out
 
     
     def split_heads(self, x, n_heads=None):
         if n_heads == None:
             n_heads = self.FLAGS.n_heads
-        print(x, 'x in split-heads')
         # split the last dimension and transpose
         split = self.split_last_dim(x, n_heads)
         out = tf.transpose(split, [0, 2, 1, 3])
@@ -210,12 +218,11 @@ class QATransformerModel(object):
 
     def combine_heads(self, x):
         # assumes x is rank 4
-        print(x, 'x in combt-heads')
         x = tf.transpose(x, [0, 2, 1, 3])
         x_shape = self.shape_list(x)
         a, b = x_shape[-2:]
         out = tf.reshape(x, x_shape[0:2] + [a * b])
-        print('out in combine_hds', out)
+        # print('out in combine_hds', out)
         return out
 
     
@@ -233,8 +240,15 @@ class QATransformerModel(object):
                                name=name)
 
 
-    def multihead_attention(self, query_antecedent, memory_antecedent,
-                            total_key_depth, total_value_depth, output_depth):
+    def multihead_attention(self,
+                            query_antecedent,
+                            memory_antecedent,
+                            q_padding,
+                            m_padding,
+                            total_key_depth,
+                            total_value_depth,
+                            output_depth):
+
         q = self.compute(query_antecedent, total_key_depth, 'learn_q')
         k = self.compute(memory_antecedent, total_key_depth, 'learn_k')
         v = self.compute(memory_antecedent, total_value_depth, 'learn_v')
@@ -242,16 +256,22 @@ class QATransformerModel(object):
         q = self.split_heads(q)
         k = self.split_heads(k)
         v = self.split_heads(v)
-
-        x = self.dotprod_attn(q, k, v)
+        
+        x = self.dotprod_attn(q, q_padding, k, m_padding, v)
 
         x = self.combine_heads(x)
         x = self.compute(x, output_depth, 'MHA_linear_output')
         return x
         
 
-    def transformer_block(self, query_antecedent, memory_antecedent,
-                            total_key_depth, total_value_depth, output_depth):
+    def transformer_block(self,
+                            query_antecedent,
+                            memory_antecedent,
+                            query_padding,
+                            memory_padding,
+                            total_key_depth,
+                            total_value_depth,
+                            output_depth):
         """
         # returns [batch, query_antecedent_length, output_depth]
         """
@@ -259,6 +279,8 @@ class QATransformerModel(object):
         # returns [batch, query_antecedent_length, output_depth]
         attn = self.multihead_attention(query_antecedent,
                                         memory_antecedent,
+                                        query_padding,
+                                        memory_padding,
                                         total_key_depth,
                                         total_value_depth,
                                         output_depth)
@@ -294,10 +316,15 @@ class QATransformerModel(object):
 
     def transformer_enc_block(self,
                               query_antecedent,
+                              query_padding,
                               total_key_depth,
                               output_depth):
-        return self.transformer_block(query_antecedent, query_antecedent,
-                                      total_key_depth, total_key_depth,
+        return self.transformer_block(query_antecedent,
+                                      query_antecedent,
+                                      query_padding,
+                                      query_padding,
+                                      total_key_depth,
+                                      total_key_depth,
                                       output_depth)
 
 
@@ -307,24 +334,25 @@ class QATransformerModel(object):
                                   qn_embs,
                                   qn_mask
                                  ):
-        # BIG TODO make embedding re-size happen BEFORE mask creation
         hidden_size = self.FLAGS.hidden_size
         context_embs = self.compute(context_embs, hidden_size, 'size_context')
         qn_embs = self.compute(context_embs, hidden_size, 'size_qn')
         # TODO: embed positions in context, and query
         with tf.variable_scope("context_encoder"):
-            # TODO: put in mask, maybe?
             for i in range(self.FLAGS.n_blocks):
                 with tf.variable_scope("block_{}".format(i)) as scope:
                     c = self.transformer_enc_block(context_embs,
+                                                   context_mask,
                                                    hidden_size,
                                                    hidden_size)
         with tf.variable_scope("question_encoder"):
             for i in range(self.FLAGS.n_blocks):
                 with tf.variable_scope("block_{}".format(i)) as scope:
                     q = self.transformer_enc_block(qn_embs,
+                                                   qn_mask,
                                                    hidden_size,
                                                    hidden_size)
+
         # encoder-decoder attention where queries come from previous layer and
         # keys and values come from the encoder output
         with tf.variable_scope("context_attends_to_question"):
@@ -333,15 +361,20 @@ class QATransformerModel(object):
                 with tf.variable_scope("block_{}".format(i)) as scope:
                     attended_q = self.transformer_block(attended_q,
                                                         c,
+                                                        qn_mask,
+                                                        context_mask,
                                                         hidden_size,
                                                         hidden_size,
                                                         hidden_size)
+
         with tf.variable_scope("question_attends_to_context"):
             # weighted sum of context, based on question representation
             for i in range(self.FLAGS.n_blocks):
                 with tf.variable_scope("block_{}".format(i)) as scope:
                     c = self.transformer_block(c,
                                                attended_q,
+                                               context_mask,
+                                               qn_mask,
                                                hidden_size,
                                                hidden_size,
                                                hidden_size)
