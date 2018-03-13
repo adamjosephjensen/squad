@@ -123,9 +123,9 @@ class QATransformerModel(object):
 
 
     #### your code here ####
+            #print(q, k, v, 'dotprod in')
     def dotprod_attn(self, q, q_padding, k, k_padding, v):
         """
-        [|Q| x d_k] x [d_k x |K|] x [|K| x d_v] = [|Q| x d_v]
         A(Q, K, V) = softmax(Q K.T / sqrt(d_k)) V
 
         q: a Tensor with shape [batch, heads, length_q, depth_k]
@@ -137,7 +137,6 @@ class QATransformerModel(object):
         returns: [batch, heads, length_q, depth_v]
         """
         with tf.variable_scope("dot_product_attention") as scope:
-            #print(q, k, v, 'dotprod in')
             d_k = tf.shape(k)[-1]
             # QKT is [batch, heads, length_q, length_kv, heads, batch]
             QKT_logits = tf.matmul(q, k, transpose_b=True)
@@ -148,29 +147,28 @@ class QATransformerModel(object):
             # num valid key tokens per key index
             valid_Ks = tf.reduce_sum(k_padding, axis=-1)
 
-            # make the part of the logits based on padded query or key == min.
+            # make the part of the logits based on padded query or key ==
+            # -Large
             # That way, softmax will put no probability mass on them
             # ideally this would be:
             # QKT_logits[:, :, valid_Qs:, :, :, :] -= 1e30
-            # there might be other ways to do this besides reduce_min
             # QKT_logits[:, :, :valid_Qs, valid_Ks:, :, :] -= 1e30
-            i = tf.constant(0)
-            while_condition = lambda i: tf.less(i, self.FLAGS.question_len)
-            def loop_over_invalid_Q(x):
-                # this seems shitty.  rather, i don't really know how to use it
-                # yet
-                return [tf.add(i, 1)]
+            # but tensorflow does not support this
 
-            r = tf.while_loop(while_condition, loop_over_invalid_Q, [i])
 
             attn_dist = tf.nn.softmax(QKT_logits, name='attention_weights');
-            
-            # NOTE google's implementation applies dropout to these weights
+            # NOTE google's implementation in tensor2tensor applies dropout to these weights
             attn_dist = tf.nn.dropout(attn_dist, self.FLAGS.dropout)
             # returns: [batch, heads, length_q, depth_v]
             out = tf.matmul(attention_dist, v)
-            #print(out, 'dotprod out')
             return out
+            #i = tf.constant(0)
+            #while_condition = lambda i: tf.less(i, self.FLAGS.question_len)
+            #def loop_over_invalid_Q(x):
+                # this seems shitty.  rather, i don't really know how to use it
+                # yet
+            #    return [tf.add(i, 1)]
+            #r = tf.while_loop(while_condition, loop_over_invalid_Q, [i])
 
     def shape_list(self, x):
         """
