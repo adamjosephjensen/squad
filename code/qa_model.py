@@ -136,18 +136,32 @@ class QATransformerModel(object):
         
         returns: [batch, heads, length_q, depth_v]
         """
-        print(q, k, v, 'dotprod in')
-        d_k = tf.shape(k)[-1]
-        # QKT is [batch, heads, length_q, length_kv, heads, batch]
-        QKT = tf.matmul(q, k, transpose_b=True) / tf.sqrt(tf.cast(d_k,
-                                                                  tf.float32)) # rank 6
-        weights = tf.nn.softmax(QKT, name='attention_weights');
-        # NOTE google's implementation applies dropout to these weights
-        weights = tf.nn.dropout(weights, self.FLAGS.dropout)
-        # returns: [batch, heads, length_q, depth_v]
-        out = tf.matmul(weights, v)
-        print(out, 'dotprod out')
-        return out
+        with tf.variable_scope(name, default_name="dot_product_attention",
+                               values=[q, k, v]) as scope:
+            print(q, k, v, 'dotprod in')
+            d_k = tf.shape(k)[-1]
+            # QKT is [batch, heads, length_q, length_kv, heads, batch]
+            QKT_logits = tf.matmul(q, k, transpose_b=True)
+            QKT_logits = QKT_logits / tf.sqrt(tf.cast(d_k, tf.float32)) # rank 6
+            
+            # q_padding will be [batch, heads, length_q]
+            valid_Qs = tf.reduce_sum(q_padding, axis=2)
+            # num valid key tokens per key index
+            valid_Ks = tf.reduce_sum(k_padding, axis=2)
+
+            # make the part of the logits based on padded query or key == min.
+            # That way, softmax will put no probability mass on them
+            QKT_logits[:, :, valid_Qs:, :, :, :] += (-1e30)
+            QKT_logits[:, :, :, valid_Ks:, :, :] = tf.reduce_min(QKT_logits)
+        
+            attn_dist = tf.nn.softmax(QKT_logits, name='attention_weights');
+            
+            # NOTE google's implementation applies dropout to these weights
+            attn_dist = tf.nn.dropout(attn_dist, self.FLAGS.dropout)
+            # returns: [batch, heads, length_q, depth_v]
+            out = tf.matmul(attention_dist, v)
+            print(out, 'dotprod out')
+            return out
 
     def shape_list(self, x):
         """
