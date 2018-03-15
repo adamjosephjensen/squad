@@ -228,8 +228,8 @@ class QATransformerModel(object):
         # (updates is what you need to fetch in session.run to do a gradient update)
         self.global_step = tf.Variable(0, name="global_step", trainable=False)
         # 1 epoch = 640 iters with batch size 100
-        boundaries = [100, 500, 1000, 5000]
-        values = [.000001, .00001, .0001, FLAGS.learning_rate * 3, FLAGS.learning_rate]
+        boundaries = [250, 500, 1000]
+        values = [.000001, .00001, .0001, FLAGS.learning_rate]
         learning_rate = tf.train.piecewise_constant(self.global_step, boundaries, values)
         opt = tf.train.AdamOptimizer(learning_rate=learning_rate) # you can try other optimizers
         self.updates = opt.apply_gradients(zip(clipped_gradients, params), global_step=self.global_step)
@@ -317,8 +317,7 @@ class QATransformerModel(object):
 
     def prepare_encoder(self, inputs, hidden_size, nonpadding):
         inputs = add_timing_signal(inputs)
-        inputs = self.compute(inputs, hidden_size,
-                                    'resize_depth')
+        #inputs = self.compute(inputs, hidden_size, 'resize_depth')
         padding = 1 - nonpadding
         minus_large = tf.constant(-1e9, dtype=tf.float32)
         padding = tf.multiply(minus_large, tf.cast(padding, tf.float32))
@@ -558,7 +557,6 @@ class QATransformerModel(object):
                                                        hidden_size)
        # (batch_size, context_len, hidden_size * 3
         model = tf.concat([c, a, c * a], axis=2) 
-        #model = self.compute(model, hidden_size, 'downsize_model') 
         with tf.variable_scope("model_encoder"):
             with tf.variable_scope("block_1") as scope:
                 _1 = self.transformer_enc_block(model,
