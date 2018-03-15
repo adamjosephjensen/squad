@@ -562,22 +562,30 @@ class QATransformerModel(object):
         with tf.variable_scope("model_encoder"):
             for i in range(self.FLAGS.n_blocks):
                 with tf.variable_scope("block_{}".format(i)) as scope:
-                    model = self.transformer_enc_block(model,
+                    _1 = self.transformer_enc_block(model,
+                                                       context_bias,
+                                                       context_mask,
+                                                       hidden_size)
+                    _2 = self.transformer_enc_block(_1,
+                                                       context_bias,
+                                                       context_mask,
+                                                       hidden_size)
+                    _3 = self.transformer_enc_block(_2,
                                                        context_bias,
                                                        context_mask,
                                                        hidden_size)
                                                    #3 * hidden_size)
                                                        
-            """
-            with tf.variable_scope("_2"):
-                _2 = self.transformer_enc_block(qn_embs,
-                                                   qn_bias,
-                                                   qn_mask,
-                                                   hidden_size)
-            """
-        blended_reps = tf.layers.dense(model, hidden_size,
-                                               tf.nn.relu)
-        self.blended_to_output(blended_reps)
+        with vs.variable_scope("StartDist"):
+            _1_2 = tf.concat([_1, _2], axis=2)
+            softmax_layer_start = SimpleSoftmaxLayer()
+            self.logits_start, self.probdist_start = softmax_layer_start.build_graph(_1_2, self.context_mask)
+
+        with vs.variable_scope("EndDist"):
+            _1_3 = tf.concat([_1, _3], axis=2)
+            softmax_layer_end = SimpleSoftmaxLayer()
+            self.logits_end, self.probdist_end = softmax_layer_end.build_graph(_1_3, self.context_mask)
+
 
 
     def blended_to_output(self, blended_reps_final):
