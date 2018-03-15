@@ -299,6 +299,7 @@ class QATransformerModel(object):
             QKT_logits = tf.matmul(q, k, transpose_b=True)
             QKT_logits = QKT_logits / tf.sqrt(tf.cast(d_k, tf.float32)) # rank 6
             print('logits:', QKT_logits)
+            print('bias:', bias)
             if bias is not None:
                 QKT_logits += bias # broadcasting black magic
             
@@ -309,7 +310,7 @@ class QATransformerModel(object):
             attn_dist = tf.nn.dropout(attn_dist, self.FLAGS.dropout)
             print('attn_dist:', attn_dist)
             out = tf.matmul(attn_dist, v)
-            print('out:', out)
+            print('weighted sum of v, based on similarity between q and k\nout:', out)
             return out
 
 
@@ -327,14 +328,15 @@ class QATransformerModel(object):
 
 
     def split_last_dim(self, x, n):
-        print('split last dim in', x, 'n', n)
+        #print('split last dim in', x, 'n', n)
         x_shape = shape_list(x)
         m = x_shape[-1]
         if isinstance(m, int) and isinstance(n, int):
-            print('m:', m, 'n:', n)
-            assert m % n == 0
+            if m % n != 0:
+                print('m:', m, 'n:', n)
+                assert( m % n == 0 )
         out = tf.reshape(x, x_shape[:-1] + [n, m // n])
-        print('split last dim out:', out)
+        #print('split last dim out:', out)
         return out
 
     
@@ -371,7 +373,7 @@ class QATransformerModel(object):
 
     def multihead_attention(self,
                             query_antecedent,
-                            q_bias,
+                            bias,
                             memory_antecedent,
                             total_key_depth,
                             total_value_depth,
@@ -385,7 +387,7 @@ class QATransformerModel(object):
         k = self.split_heads(k)
         v = self.split_heads(v)
         
-        x = self.dotprod_attn(q, k, v, q_bias)
+        x = self.dotprod_attn(q, k, v, bias)
 
         x = self.combine_heads(x)
         x = self.compute(x, output_depth, 'MHA_linear_output')
@@ -394,7 +396,7 @@ class QATransformerModel(object):
 
     def transformer_encoder_block(self,
                             query_antecedent,
-                            query_bias,
+                            logits_bias,
                             memory_antecedent,
                             query_mask,
                             memory_mask,
@@ -405,7 +407,7 @@ class QATransformerModel(object):
         # returns [batch, query_antecedent_length, output_depth]
         """
         attn = self.multihead_attention(query_antecedent,
-                                        query_bias,
+                                        logits_bias,
                                         memory_antecedent,
                                         total_key_depth,
                                         total_value_depth,
@@ -438,7 +440,7 @@ class QATransformerModel(object):
 
     def transformer_decoder_block(self,
                             query_antecedent,
-                            query_bias,
+                            logits_bias,
                             memory_antecedent,
                             query_mask,
                             memory_mask,
@@ -449,7 +451,7 @@ class QATransformerModel(object):
         # returns [batch, query_antecedent_length, output_depth]
         """
         attn = self.multihead_attention(query_antecedent,
-                                        query_bias,
+                                        logits_bias,
                                         memory_antecedent,
                                         total_key_depth,
                                         total_value_depth,
@@ -484,11 +486,11 @@ class QATransformerModel(object):
 
     def transformer_enc_block(self,
                               query_antecedent,
-                              query_bias,
+                              logits_bias,
                               query_mask,
                               total_key_depth):
         return self.transformer_encoder_block(query_antecedent,
-                                      query_bias,
+                                      logits_bias,
                                       query_antecedent,
                                       query_mask,
                                       query_mask,
@@ -526,32 +528,54 @@ class QATransformerModel(object):
 
         # attention where queries come from previous layer and
         # keys and values come from the encoder output
-        with tf.variable_scope("context_attends_to_question"):
-            for i in range(self.FLAGS.n_blocks):
-                with tf.variable_scope("block_{}".format(i)) as scope:
-                    attended_q = self.transformer_encoder_block(q,
-                                                                context_bias,
-                                                                c,
-                                                                qn_mask,
-                                                                context_mask,
-                                                                hidden_size,
-                                                                hidden_size,
-                                                                hidden_size)
-
+        # weighted sum of V, based on similarity between Q and K associated
+        # query-to-context attention only provides a slight benefit
         with tf.variable_scope("question_attends_to_context"):
-            # weighted sum of context, based on question representation
+            # weighted sum of context, based on question representation, with
+            # the shape of the question
             for i in range(self.FLAGS.n_blocks):
                 with tf.variable_scope("block_{}".format(i)) as scope:
-                    c = self.transformer_encoder_block(c,
-                                               qn_bias,
-                                               q,
-                                               context_mask,
+                    q = self.transformer_encoder_block(q,
+                                               context_bias,
+                                               c,
                                                qn_mask,
+                                               context_mask,
                                                hidden_size,
                                                hidden_size,
                                                hidden_size)
-        
-        blended_reps = tf.layers.dense(c, hidden_size,
+        # with V
+        with tf.variable_scope("context_to_question_attention"):
+            a = c
+            for i in range(self.FLAGS.n_blocks):
+                with tf.variable_scope("block_{}".format(i)) as scope:
+                    a = self.transformer_encoder_block(a,
+                                                       qn_bias,
+                                                       q,
+                                                       context_mask,
+                                                       qn_mask,
+                                                       hidden_size,
+                                                       hidden_size,
+                                                       hidden_size)
+       # (batch_size, context_len, hidden_size * 3
+        # model = tf.concat([c, a, c * a], axis=2) 
+        model = a
+        with tf.variable_scope("model_encoder"):
+            for i in range(self.FLAGS.n_blocks):
+                with tf.variable_scope("block_{}".format(i)) as scope:
+                    model = self.transformer_enc_block(model,
+                                                       context_bias,
+                                                       context_mask,
+                                                       hidden_size)
+                                                   #3 * hidden_size)
+                                                       
+            """
+            with tf.variable_scope("_2"):
+                _2 = self.transformer_enc_block(qn_embs,
+                                                   qn_bias,
+                                                   qn_mask,
+                                                   hidden_size)
+            """
+        blended_reps = tf.layers.dense(model, hidden_size,
                                                tf.nn.relu)
         self.blended_to_output(blended_reps)
 

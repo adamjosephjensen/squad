@@ -51,13 +51,13 @@ tf.app.flags.DEFINE_float("dropout", 0.1, "Fraction of units randomly dropped on
 tf.app.flags.DEFINE_integer("batch_size", 100, "Batch size to use")
 tf.app.flags.DEFINE_integer("hidden_size", 128, "Size of the hidden states")
 # the long tail is between 300 and 390 TODO change to 390 at test time
-tf.app.flags.DEFINE_integer("context_len", 390, "The maximum context length of your model")
+tf.app.flags.DEFINE_integer("context_len", 300, "The maximum context length of your model")
 # the long tail is between 22 and 30
 tf.app.flags.DEFINE_integer("question_len", 30, "The maximum question length of your model")
 tf.app.flags.DEFINE_integer("embedding_size", 100, "Size of the pretrained word vectors. This needs to be one of the available GloVe dimensions: 50/100/200/300")
 # Transformer Network Hparams
 # TODO change to 6
-tf.app.flags.DEFINE_integer("n_blocks", 2, "number of transformer blocks")
+tf.app.flags.DEFINE_integer("n_blocks", 3, "number of transformer blocks")
 tf.app.flags.DEFINE_integer("n_heads", 8, "number of heads for attention")
 
 # How often to print, save, eval
