@@ -227,10 +227,11 @@ class QATransformerModel(object):
         # Define optimizer and updates
         # (updates is what you need to fetch in session.run to do a gradient update)
         self.global_step = tf.Variable(0, name="global_step", trainable=False)
-        boundaries = [100, 1000, 1000]
-        values = [.0001, 0.1, 0.01, FLAGS.learning_rate]
+        # 1 epoch = 640 iters with batch size 100
+        boundaries = [1000, 10000]
+        values = [.0001, FLAGS.learning_rate * 3, FLAGS.learning_rate]
         learning_rate = tf.train.piecewise_constant(self.global_step, boundaries, values)
-        opt = tf.train.AdamOptimizer(learning_rate=FLAGS.learning_rate) # you can try other optimizers
+        opt = tf.train.AdamOptimizer(learning_rate=learning_rate) # you can try other optimizers
         self.updates = opt.apply_gradients(zip(clipped_gradients, params), global_step=self.global_step)
 
         # Define savers (for checkpointing) and summaries (for tensorboard)
