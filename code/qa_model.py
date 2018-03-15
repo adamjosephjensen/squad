@@ -436,6 +436,52 @@ class QATransformerModel(object):
             #                                     activation_fn=tf.nn.relu)
         return nor2 
 
+    def transformer_decoder_block(self,
+                            query_antecedent,
+                            query_bias,
+                            memory_antecedent,
+                            query_mask,
+                            memory_mask,
+                            total_key_depth,
+                            total_value_depth,
+                            output_depth):
+        """
+        # returns [batch, query_antecedent_length, output_depth]
+        """
+        attn = self.multihead_attention(query_antecedent,
+                                        query_bias,
+                                        memory_antecedent,
+                                        total_key_depth,
+                                        total_value_depth,
+                                        output_depth)
+        # dropout, add, and norm
+        # query_antecedent might not have come in with depth == output_depth
+        # but if so we add a skip connection
+        attn = tf.nn.dropout(attn, self.FLAGS.dropout)
+        if tf.shape(query_antecedent)[2] == tf.shape(attn)[2]:
+            nor1 = tf.contrib.layers.layer_norm(attn + query_antecedent,
+                                            activation_fn=tf.nn.relu)
+        else:
+            nor1 = tf.contrib.layers.layer_norm(attn,
+                                                activation_fn=tf.nn.relu)
+
+        # feed forward twice, without changing shape
+        with tf.variable_scope("ffn"):
+            fc = transformer_ffn_layer(nor1, query_mask, output_depth,
+                                       self.FLAGS.dropout)
+        # dropout, add, and norm
+        sub2 = tf.nn.dropout(fc, self.FLAGS.dropout)
+        nor2 = tf.contrib.layers.layer_norm(sub2 + nor1,
+                                            activation_fn=tf.nn.relu)
+        # NOTE: adding a second skip connection here is not standard but it
+        # might be fun
+        # if tf.shape(query_antecedent)[2] == tf.shape(nor2)[2]:
+            # nor2 = tf.contrib.layers.layer_norm(nor2 + query_antecedent,
+            #                                     activation_fn=tf.nn.relu)
+        return nor2 
+
+
+
     def transformer_enc_block(self,
                               query_antecedent,
                               query_bias,
