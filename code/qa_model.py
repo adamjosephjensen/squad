@@ -228,8 +228,8 @@ class QATransformerModel(object):
         # (updates is what you need to fetch in session.run to do a gradient update)
         self.global_step = tf.Variable(0, name="global_step", trainable=False)
         # 1 epoch = 640 iters with batch size 100
-        boundaries = [1000, 10000]
-        values = [.0001, FLAGS.learning_rate * 3, FLAGS.learning_rate]
+        boundaries = [100, 500, 1000, 5000]
+        values = [.000001, .00001, .0001, FLAGS.learning_rate * 3, FLAGS.learning_rate]
         learning_rate = tf.train.piecewise_constant(self.global_step, boundaries, values)
         opt = tf.train.AdamOptimizer(learning_rate=learning_rate) # you can try other optimizers
         self.updates = opt.apply_gradients(zip(clipped_gradients, params), global_step=self.global_step)
@@ -531,7 +531,7 @@ class QATransformerModel(object):
         # keys and values come from the encoder output
         # weighted sum of V, based on similarity between Q and K associated
         # query-to-context attention only provides a slight benefit
-        with tf.variable_scope("question_attends_to_context"):
+        """with tf.variable_scope("question_attends_to_context"):
             # weighted sum of context, based on question representation, with
             # the shape of the question
             for i in range(self.FLAGS.n_blocks):
@@ -544,12 +544,11 @@ class QATransformerModel(object):
                                                hidden_size,
                                                hidden_size,
                                                hidden_size)
-        # with V
+        """
         with tf.variable_scope("context_to_question_attention"):
-            a = c
             for i in range(self.FLAGS.n_blocks):
                 with tf.variable_scope("block_{}".format(i)) as scope:
-                    a = self.transformer_encoder_block(a,
+                    a = self.transformer_encoder_block(c,
                                                        qn_bias,
                                                        q,
                                                        context_mask,
@@ -558,8 +557,8 @@ class QATransformerModel(object):
                                                        hidden_size,
                                                        hidden_size)
        # (batch_size, context_len, hidden_size * 3
-        # model = tf.concat([c, a, c * a], axis=2) 
-        model = a
+        model = tf.concat([c, a, c * a], axis=2) 
+        #model = self.compute(model, hidden_size, 'downsize_model') 
         with tf.variable_scope("model_encoder"):
             with tf.variable_scope("block_1") as scope:
                 _1 = self.transformer_enc_block(model,
@@ -576,7 +575,6 @@ class QATransformerModel(object):
                                                    context_bias,
                                                    context_mask,
                                                    hidden_size)
-                                                   #3 * hidden_size)
                                                        
         with vs.variable_scope("StartDist"):
             _1_2 = tf.concat([_1, _2], axis=2)
