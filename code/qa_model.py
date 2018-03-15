@@ -22,6 +22,7 @@ import logging
 import os
 import sys
 import pdb
+import math
 
 import numpy as np
 import tensorflow as tf
@@ -35,6 +36,156 @@ from modules import RNNEncoder, SimpleSoftmaxLayer, BasicAttn
 
 logging.basicConfig(level=logging.INFO)
 
+
+
+def shape_list(x):
+    """
+    taken from tensor2tensor github
+    
+    Return list of dims, statically where possible."""
+    x = tf.convert_to_tensor(x)
+
+    # If unknown rank, return dynamic shape
+    if x.get_shape().dims is None:
+        return tf.shape(x)
+
+    static = x.get_shape().as_list()
+    shape = tf.shape(x)
+
+    ret = []
+    for i in xrange(len(static)):
+        dim = static[i]
+        if dim is None:
+           dim = shape[i]
+        ret.append(dim)
+    return ret
+
+
+def get_timing_signal_1d(length,
+                         channels,
+                         min_timescale=1.0,
+                         max_timescale=1.0e4):
+    position = tf.to_float(tf.range(length))
+    num_timescales = channels // 2
+    log_timescale_increment = (
+        math.log(float(max_timescale) / float(min_timescale)) /
+        (tf.to_float(num_timescales) - 1))
+    inv_timescales = min_timescale * tf.exp(
+        tf.to_float(tf.range(num_timescales)) * -log_timescale_increment)
+    scaled_time = tf.expand_dims(position, 1) * tf.expand_dims(inv_timescales, 0)
+    signal = tf.concat([tf.sin(scaled_time), tf.cos(scaled_time)], axis=1)
+    signal = tf.pad(signal, [[0, 0], [0, tf.mod(channels, 2)]])
+    signal = tf.reshape(signal, [1, length, channels])
+    return signal
+
+
+class PadRemover(object):
+    """Helper to remove padding from a tensor before sending to the experts.
+    The padding is computed for one reference tensor containing the padding mask
+    and then can be applied to any other tensor of shape [dim_origin,...].
+    Ex:
+            input = [
+                [tok1, tok2],
+                [tok3, tok4],
+                [0, 0],
+                [0, 0],
+                [tok5, tok6],
+                [0, 0],
+            ]
+            output = [
+                [tok1, tok2],
+                [tok3, tok4],
+                [tok5, tok6],
+            ]
+    """
+
+    def __init__(self, pad_mask):
+        """Compute and store the location of the padding.
+        Args:
+            pad_mask (tf.Tensor): Reference padding tensor of shape
+                [batch_size,length] or [dim_origin] (dim_origin=batch_size*length)
+                containing non-zeros positive values to indicate padding location.
+        """
+        self.nonpad_ids = None
+        self.dim_origin = None
+
+        with tf.name_scope("pad_reduce/get_ids"):
+            pad_mask = tf.reshape(pad_mask, [-1])    # Flatten the batch
+            # nonpad_ids contains coordinates of zeros rows (as pad_mask is
+            # float32, checking zero equality is done with |x| < epsilon, with
+            # epsilon=1e-9 as standard, here pad_mask only contains positive values
+            # so tf.abs would be redundant)
+            self.nonpad_ids = tf.to_int32(tf.where(tf.cast(pad_mask,
+                                                           tf.float32) < 1e-9))
+            self.dim_origin = tf.shape(pad_mask)[:1]
+
+    def remove(self, x):
+        """Remove padding from the given tensor.
+        Args:
+            x (tf.Tensor): of shape [dim_origin,...]
+        Returns:
+            a tensor of shape [dim_compressed,...] with dim_compressed <= dim_origin
+        """
+        with tf.name_scope("pad_reduce/remove"):
+            x_shape = x.get_shape().as_list()
+            x = tf.gather_nd(
+                    x,
+                    indices=self.nonpad_ids,
+            )
+            # if not context.in_eager_mode():
+                # This is a hack but for some reason, gather_nd return a tensor of
+                # undefined shape, so the shape is set up manually
+            x.set_shape([None] + x_shape[1:])
+        return x
+
+    def restore(self, x):
+        """Add padding back to the given tensor.
+        Args:
+            x (tf.Tensor): of shape [dim_compressed,...]
+        Returns:
+            a tensor of shape [dim_origin,...] with dim_compressed >= dim_origin. The
+            dim is restored from the original reference tensor
+        """
+        with tf.name_scope("pad_reduce/restore"):
+            x = tf.scatter_nd(
+                    indices=self.nonpad_ids,
+                    updates=x,
+                    shape=tf.concat([self.dim_origin, tf.shape(x)[1:]], axis=0),
+            )
+        return x
+
+def transformer_ffn_layer(x, nonpadding, hidden_size, dropout=0.0):
+    """
+    removes padding
+    computes dense-relu-dense
+    then puts padding back
+    """
+    pad_remover = PadRemover(nonpadding)
+    original_shape = shape_list(x)
+    # Collapse `x` across examples, and remove padding positions.
+    x = tf.reshape(x, tf.concat([[-1], original_shape[2:]],
+                    axis=0))
+    x = tf.expand_dims(pad_remover.remove(x), axis=0)
+    x = tf.layers.dense(x, hidden_size, activation=tf.nn.relu, name='ffn_1')
+    if dropout != 0.0:
+        out = tf.nn.dropout(x, dropout)
+    x = tf.layers.dense(x, hidden_size, activation=None, name='ffn_2')
+    out = tf.reshape(
+                  pad_remover.restore(tf.squeeze(x, axis=0)),
+        original_shape)
+    return out
+
+
+
+def add_timing_signal(x, min_timescale=1.0, max_timescale=1.0e4):
+    """ from
+    https://github.com/tensorflow/tensor2tensor/blob/master/tensor2tensor/layers/common_attention.py
+    """
+    length = shape_list(x)[1]
+    channels = shape_list(x)[2]
+    signal = get_timing_signal_1d(length, channels, min_timescale,
+                                      max_timescale)
+    return x + signal
 
 class QATransformerModel(object):
     """Top-level Question Answering module"""
@@ -76,6 +227,9 @@ class QATransformerModel(object):
         # Define optimizer and updates
         # (updates is what you need to fetch in session.run to do a gradient update)
         self.global_step = tf.Variable(0, name="global_step", trainable=False)
+        boundaries = [100, 1000, 1000]
+        values = [.0001, 0.1, 0.01, FLAGS.learning_rate]
+        learning_rate = tf.train.piecewise_constant(global_step, boundaries, values)
         opt = tf.train.AdamOptimizer(learning_rate=FLAGS.learning_rate) # you can try other optimizers
         self.updates = opt.apply_gradients(zip(clipped_gradients, params), global_step=self.global_step)
 
@@ -123,8 +277,8 @@ class QATransformerModel(object):
 
 
     #### your code here ####
-            #print(q, k, v, 'dotprod in')
-    def dotprod_attn(self, q, q_padding, k, k_padding, v):
+        
+    def dotprod_attn(self, q, k, v, bias, name=None):
         """
         A(Q, K, V) = softmax(Q K.T / sqrt(d_k)) V
 
@@ -136,68 +290,45 @@ class QATransformerModel(object):
         
         returns: [batch, heads, length_q, depth_v]
         """
-        with tf.variable_scope("dot_product_attention") as scope:
+        with tf.variable_scope(name,
+                               default_name="dot_product_attention",
+                               values=[q,k,v]) as scope:
             d_k = tf.shape(k)[-1]
-            # QKT is [batch, heads, length_q, length_kv, heads, batch]
+            print('dot product attention with \nq: {}\nk: {}, \nv: {}'.format(q, k, v))
+            # QKT is [batch, heads, length_q, length_kv]
             QKT_logits = tf.matmul(q, k, transpose_b=True)
             QKT_logits = QKT_logits / tf.sqrt(tf.cast(d_k, tf.float32)) # rank 6
+            print('logits:', QKT_logits)
+            if bias is not None:
+                QKT_logits += bias # broadcasting black magic
             
-            # q_padding will be [batch, length_q]
-            valid_Qs = tf.reduce_sum(q_padding, axis=-1)
-            # num valid key tokens per key index
-            valid_Ks = tf.reduce_sum(k_padding, axis=-1)
-
-            # make the part of the logits based on padded query or key ==
-            # -Large
-            # That way, softmax will put no probability mass on them
-            # ideally this would be:
-            # QKT_logits[:, :, valid_Qs:, :, :, :] -= 1e30
-            # QKT_logits[:, :, :valid_Qs, valid_Ks:, :, :] -= 1e30
-            # but tensorflow does not support this
-
-
             attn_dist = tf.nn.softmax(QKT_logits,
                                       name='attention_distribution')
             # returns: [batch, heads, length_q, depth_v]
-            out = tf.matmul(attention_dist, v)
+            # NOTE google's implementation in tensor2tensor applies dropout to these weights
+            attn_dist = tf.nn.dropout(attn_dist, self.FLAGS.dropout)
+            print('attn_dist:', attn_dist)
+            out = tf.matmul(attn_dist, v)
+            print('out:', out)
             return out
 
-            # NOTE google's implementation in tensor2tensor applies dropout to these weights
-            # attn_dist = tf.nn.dropout(attn_dist, self.FLAGS.dropout)
-            #i = tf.constant(0)
-            #while_condition = lambda i: tf.less(i, self.FLAGS.question_len)
-            #def loop_over_invalid_Q(x):
-                # this seems shitty.  rather, i don't really know how to use it
-                # yet
-            #    return [tf.add(i, 1)]
-            #r = tf.while_loop(while_condition, loop_over_invalid_Q, [i])
 
-    def shape_list(self, x):
-        """
-        taken from tensor2tensor github
-        
-        Return list of dims, statically where possible."""
-        x = tf.convert_to_tensor(x)
-
-        # If unknown rank, return dynamic shape
-        if x.get_shape().dims is None:
-            return tf.shape(x)
-
-        static = x.get_shape().as_list()
-        shape = tf.shape(x)
-
-        ret = []
-        for i in xrange(len(static)):
-            dim = static[i]
-            if dim is None:
-               dim = shape[i]
-            ret.append(dim)
-        return ret
+    def prepare_encoder(self, inputs, hidden_size, nonpadding):
+        inputs = add_timing_signal(inputs)
+        inputs = self.compute(inputs, hidden_size,
+                                    'resize_depth')
+        padding = 1 - nonpadding
+        minus_large = tf.constant(-1e9, dtype=tf.float32)
+        padding = tf.multiply(minus_large, tf.cast(padding, tf.float32))
+        # a `Tensor` with shape [batch, 1, 1, hidden_size]
+        ignore = tf.expand_dims(tf.expand_dims(padding, axis=1), axis=1) 
+        encoder_self_attention_bias = ignore
+        return (inputs, encoder_self_attention_bias)
 
 
     def split_last_dim(self, x, n):
         print('split last dim in', x, 'n', n)
-        x_shape = self.shape_list(x)
+        x_shape = shape_list(x)
         m = x_shape[-1]
         if isinstance(m, int) and isinstance(n, int):
             print('m:', m, 'n:', n)
@@ -219,7 +350,7 @@ class QATransformerModel(object):
     def combine_heads(self, x):
         # assumes x is rank 4
         x = tf.transpose(x, [0, 2, 1, 3])
-        x_shape = self.shape_list(x)
+        x_shape = shape_list(x)
         a, b = x_shape[-2:]
         out = tf.reshape(x, x_shape[0:2] + [a * b])
         # print('out in combine_hds', out)
@@ -230,8 +361,6 @@ class QATransformerModel(object):
         """
         Output tensor the same shape as inputs except the last dimension is
         output_depth.
-
-        Learned transformation
         """
         return tf.layers.dense(inputs,
                                output_depth,
@@ -242,9 +371,8 @@ class QATransformerModel(object):
 
     def multihead_attention(self,
                             query_antecedent,
+                            q_bias,
                             memory_antecedent,
-                            q_padding,
-                            m_padding,
                             total_key_depth,
                             total_value_depth,
                             output_depth):
@@ -257,30 +385,28 @@ class QATransformerModel(object):
         k = self.split_heads(k)
         v = self.split_heads(v)
         
-        x = self.dotprod_attn(q, q_padding, k, m_padding, v)
+        x = self.dotprod_attn(q, k, v, q_bias)
 
         x = self.combine_heads(x)
         x = self.compute(x, output_depth, 'MHA_linear_output')
         return x
-        
 
-    def transformer_block(self,
+
+    def transformer_encoder_block(self,
                             query_antecedent,
+                            query_bias,
                             memory_antecedent,
-                            query_padding,
-                            memory_padding,
+                            query_mask,
+                            memory_mask,
                             total_key_depth,
                             total_value_depth,
                             output_depth):
         """
         # returns [batch, query_antecedent_length, output_depth]
         """
-        # TODO: maybe account for the mask?
-        # returns [batch, query_antecedent_length, output_depth]
         attn = self.multihead_attention(query_antecedent,
+                                        query_bias,
                                         memory_antecedent,
-                                        query_padding,
-                                        memory_padding,
                                         total_key_depth,
                                         total_value_depth,
                                         output_depth)
@@ -290,42 +416,39 @@ class QATransformerModel(object):
         attn = tf.nn.dropout(attn, self.FLAGS.dropout)
         if tf.shape(query_antecedent)[2] == tf.shape(attn)[2]:
             nor1 = tf.contrib.layers.layer_norm(attn + query_antecedent,
-                                            activation_fn=tf.nn.leaky_relu)
+                                            activation_fn=tf.nn.relu)
         else:
             nor1 = tf.contrib.layers.layer_norm(attn,
-                                                activation_fn=tf.nn.leaky_relu)
+                                                activation_fn=tf.nn.relu)
 
         # feed forward twice, without changing shape
-        fc = tf.layers.dense(nor1,
-                                     output_depth,
-                                     activation=tf.nn.leaky_relu)
-        fc = tf.layers.dense(fc,
-                                      output_depth,
-                                      activation=None)
+        with tf.variable_scope("ffn"):
+            fc = transformer_ffn_layer(nor1, query_mask, output_depth,
+                                       self.FLAGS.dropout)
         # dropout, add, and norm
         sub2 = tf.nn.dropout(fc, self.FLAGS.dropout)
         nor2 = tf.contrib.layers.layer_norm(sub2 + nor1,
-                                            activation_fn=tf.nn.leaky_relu)
+                                            activation_fn=tf.nn.relu)
         # NOTE: adding a second skip connection here is not standard but it
         # might be fun
         # if tf.shape(query_antecedent)[2] == tf.shape(nor2)[2]:
             # nor2 = tf.contrib.layers.layer_norm(nor2 + query_antecedent,
-            #                                     activation_fn=tf.nn.leaky_relu)
-        return nor2
-
+            #                                     activation_fn=tf.nn.relu)
+        return nor2 
 
     def transformer_enc_block(self,
                               query_antecedent,
-                              query_padding,
-                              total_key_depth,
-                              output_depth):
-        return self.transformer_block(query_antecedent,
+                              query_bias,
+                              query_mask,
+                              total_key_depth):
+        return self.transformer_encoder_block(query_antecedent,
+                                      query_bias,
                                       query_antecedent,
-                                      query_padding,
-                                      query_padding,
+                                      query_mask,
+                                      query_mask,
                                       total_key_depth,
                                       total_key_depth,
-                                      output_depth)
+                                      total_key_depth)
 
 
     def build_transformer_b(self,
@@ -335,44 +458,47 @@ class QATransformerModel(object):
                                   qn_mask
                                  ):
         hidden_size = self.FLAGS.hidden_size
-        context_embs = self.compute(context_embs, hidden_size, 'size_context')
-        qn_embs = self.compute(context_embs, hidden_size, 'size_qn')
-        # TODO: embed positions in context, and query
         with tf.variable_scope("context_encoder"):
+            context_embs, context_bias = self.prepare_encoder(context_embs,
+                                                          hidden_size,
+                                                          context_mask)
             for i in range(self.FLAGS.n_blocks):
                 with tf.variable_scope("block_{}".format(i)) as scope:
                     c = self.transformer_enc_block(context_embs,
+                                                   context_bias,
                                                    context_mask,
-                                                   hidden_size,
                                                    hidden_size)
+
         with tf.variable_scope("question_encoder"):
+            qn_embs, qn_bias = self.prepare_encoder(qn_embs, hidden_size, qn_mask)
             for i in range(self.FLAGS.n_blocks):
                 with tf.variable_scope("block_{}".format(i)) as scope:
                     q = self.transformer_enc_block(qn_embs,
+                                                   qn_bias,
                                                    qn_mask,
-                                                   hidden_size,
                                                    hidden_size)
 
-        # encoder-decoder attention where queries come from previous layer and
+        # attention where queries come from previous layer and
         # keys and values come from the encoder output
         with tf.variable_scope("context_attends_to_question"):
             for i in range(self.FLAGS.n_blocks):
-                attended_q = q
                 with tf.variable_scope("block_{}".format(i)) as scope:
-                    attended_q = self.transformer_block(attended_q,
-                                                        c,
-                                                        qn_mask,
-                                                        context_mask,
-                                                        hidden_size,
-                                                        hidden_size,
-                                                        hidden_size)
+                    attended_q = self.transformer_encoder_block(q,
+                                                                context_bias,
+                                                                c,
+                                                                qn_mask,
+                                                                context_mask,
+                                                                hidden_size,
+                                                                hidden_size,
+                                                                hidden_size)
 
         with tf.variable_scope("question_attends_to_context"):
             # weighted sum of context, based on question representation
             for i in range(self.FLAGS.n_blocks):
                 with tf.variable_scope("block_{}".format(i)) as scope:
-                    c = self.transformer_block(c,
-                                               attended_q,
+                    c = self.transformer_encoder_block(c,
+                                               qn_bias,
+                                               q,
                                                context_mask,
                                                qn_mask,
                                                hidden_size,
@@ -380,7 +506,7 @@ class QATransformerModel(object):
                                                hidden_size)
         
         blended_reps = tf.layers.dense(c, hidden_size,
-                                               tf.nn.leaky_relu)
+                                               tf.nn.relu)
         self.blended_to_output(blended_reps)
 
 
@@ -398,6 +524,9 @@ class QATransformerModel(object):
         with vs.variable_scope("EndDist"):
             softmax_layer_end = SimpleSoftmaxLayer()
             self.logits_end, self.probdist_end = softmax_layer_end.build_graph(blended_reps_final, self.context_mask)
+
+        print('probdist_start: {}'.format(self.probdist_start))
+        print('probdist_end: {}'.format(self.probdist_end))
 
 
     def add_loss(self):
@@ -941,7 +1070,7 @@ class QAModel(object):
         """
         # Match up our input data with the placeholders
         input_feed = {}
-        input_feed[self.context_ids] = batch.context_ids
+        input_feed[self.context_ids] = batch.context_iids
         input_feed[self.context_mask] = batch.context_mask
         input_feed[self.qn_ids] = batch.qn_ids
         input_feed[self.qn_mask] = batch.qn_mask
