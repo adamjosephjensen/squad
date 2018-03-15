@@ -438,7 +438,7 @@ class QATransformerModel(object):
             #                                     activation_fn=tf.nn.relu)
         return nor2 
 
-    def transformer_decoder_block(self,
+    def transformer_decoder_1block(self,
                             query_antecedent,
                             logits_bias,
                             memory_antecedent,
@@ -560,20 +560,21 @@ class QATransformerModel(object):
         # model = tf.concat([c, a, c * a], axis=2) 
         model = a
         with tf.variable_scope("model_encoder"):
-            for i in range(self.FLAGS.n_blocks):
-                with tf.variable_scope("block_{}".format(i)) as scope:
-                    _1 = self.transformer_enc_block(model,
-                                                       context_bias,
-                                                       context_mask,
-                                                       hidden_size)
-                    _2 = self.transformer_enc_block(_1,
-                                                       context_bias,
-                                                       context_mask,
-                                                       hidden_size)
-                    _3 = self.transformer_enc_block(_2,
-                                                       context_bias,
-                                                       context_mask,
-                                                       hidden_size)
+            with tf.variable_scope("block_1") as scope:
+                _1 = self.transformer_enc_block(model,
+                                                   context_bias,
+                                                   context_mask,
+                                                   hidden_size)
+            with tf.variable_scope("block_2") as scope:
+                _2 = self.transformer_enc_block(_1,
+                                                   context_bias,
+                                                   context_mask,
+                                                   hidden_size)
+            with tf.variable_scope("block_3") as scope:
+                _3 = self.transformer_enc_block(_2,
+                                                   context_bias,
+                                                   context_mask,
+                                                   hidden_size)
                                                    #3 * hidden_size)
                                                        
         with vs.variable_scope("StartDist"):
