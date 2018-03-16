@@ -228,8 +228,8 @@ class QATransformerModel(object):
         # (updates is what you need to fetch in session.run to do a gradient update)
         self.global_step = tf.Variable(0, name="global_step", trainable=False)
         # 1 epoch = 640 iters with batch size 100
-        boundaries = [250, 500, 1000]
-        values = [.000001, .00001, .0001, FLAGS.learning_rate]
+        boundaries = [200, 400, 640, 12000]
+        values = [.000001, .00001, .0001, FLAGS.learning_rate * 3, FLAGS.learning_rate]
         learning_rate = tf.train.piecewise_constant(self.global_step, boundaries, values)
         opt = tf.train.AdamOptimizer(learning_rate=learning_rate) # you can try other optimizers
         self.updates = opt.apply_gradients(zip(clipped_gradients, params), global_step=self.global_step)
@@ -455,25 +455,35 @@ class QATransformerModel(object):
                                       total_key_depth)
 
     
-    def context_to_query_attn(c, c_mask, c_bias, qn, qn_mask, qn_bias,
-                              hidden_size, simple=True):
-        if simple:
+    def context_to_query_attn(self, c,
+                              c_mask,
+                              c_bias,
+                              q,
+                              qn_mask,
+                              qn_bias,
+                              hidden_size,
+                              mode='simple'):
+        if mode == 'simple':
             attn_layer = BasicAttn(self.keep_prob,
                                    self.FLAGS.hidden_size,
                                    self.FLAGS.hidden_size)
-            _, c = attn_layer.build_graph(qn, qn_mask, c)
-        else:
+            _, attn_out = attn_layer.build_graph(qn, qn_mask, c)
+            return attn_out
+        elif mode == 'multihead':
             for i in range(self.FLAGS.n_blocks):
                 with tf.variable_scope("block_{}".format(i)) as scope:
                     c = self.transformer_encoder_block(c,
                                                        qn_bias,
                                                        q,
-                                                       context_mask,
+                                                       c_mask,
                                                        qn_mask,
                                                        hidden_size,
                                                        hidden_size,
                                                        hidden_size)
-        return c
+            return c
+        else:
+             print('must provide a recognized mode')
+             assert(0)
 
     def build_transformer_b(self,
                                   context_embs,
@@ -507,6 +517,14 @@ class QATransformerModel(object):
         # weighted sum of V, based on similarity between Q and K associated
         # query-to-context attention only provides a slight benefit
         with tf.variable_scope("context_to_question_attention"):
+            a = self.context_to_query_attn(c,
+                                           context_mask,
+                                           context_bias,
+                                           q,
+                                           qn_mask,
+                                           qn_bias,
+                                           hidden_size,
+                                           'multihead')
        # (batch_size, context_len, hidden_size * 3
         model = tf.concat([c, a, c * a], axis=2) 
         with tf.variable_scope("model_encoder"):
@@ -876,7 +894,7 @@ class QATransformerModel(object):
                 # Sometimes print info to screen
                 if global_step % self.FLAGS.print_every == 0:
                     logging.info(
-                        'epoch %d, iter %d, loss %.5f, smoothed loss %.5f, grad norm %.5f, param norm %.5f, batch time %.3f' %
+                        'epoch %d, iter %d, loss %.1f, smoothed loss %.2f, grad norm %.3f, param norm %.1f, batch time %.2f' %
                         (epoch, global_step, loss, exp_loss, grad_norm, param_norm, iter_time))
 
 
