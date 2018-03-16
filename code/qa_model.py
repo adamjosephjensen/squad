@@ -467,7 +467,7 @@ class QATransformerModel(object):
             attn_layer = BasicAttn(self.keep_prob,
                                    self.FLAGS.hidden_size,
                                    self.FLAGS.hidden_size)
-            _, attn_out = attn_layer.build_graph(qn, qn_mask, c)
+            _, attn_out = attn_layer.build_graph(q, qn_mask, c)
             return attn_out
         elif mode == 'multihead':
             for i in range(self.FLAGS.n_blocks):
@@ -524,7 +524,7 @@ class QATransformerModel(object):
                                            qn_mask,
                                            qn_bias,
                                            hidden_size,
-                                           'multihead')
+                                           'simple')
        # (batch_size, context_len, hidden_size * 3
         model = tf.concat([c, a, c * a], axis=2) 
         with tf.variable_scope("model_encoder"):
