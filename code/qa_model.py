@@ -308,7 +308,7 @@ class QATransformerModel(object):
                                       name='attention_distribution')
             # returns: [batch, heads, length_q, depth_v]
             # NOTE google's implementation in tensor2tensor applies dropout to these weights
-            attn_dist = tf.nn.dropout(attn_dist, self.FLAGS.dropout)
+            attn_dist = tf.nn.dropout(attn_dist, self.keep_prob)
             print('attn_dist:', attn_dist)
             out = tf.matmul(attn_dist, v)
             print('weighted sum of v, based on similarity between q and k\nout:', out)
@@ -415,7 +415,7 @@ class QATransformerModel(object):
         # dropout, add, and norm
         # query_antecedent might not have come in with depth == output_depth
         # but if so we add a skip connection
-        attn = tf.nn.dropout(attn, self.FLAGS.dropout)
+        attn = tf.nn.dropout(attn, self.keep_prob)
         if tf.shape(query_antecedent)[2] == tf.shape(attn)[2]:
             nor1 = tf.contrib.layers.layer_norm(attn + query_antecedent,
                                             activation_fn=tf.nn.relu)
@@ -426,53 +426,9 @@ class QATransformerModel(object):
         # feed forward twice, without changing shape
         with tf.variable_scope("ffn"):
             fc = transformer_ffn_layer(nor1, query_mask, output_depth,
-                                       self.FLAGS.dropout)
+                                       self.keep_prob)
         # dropout, add, and norm
-        sub2 = tf.nn.dropout(fc, self.FLAGS.dropout)
-        nor2 = tf.contrib.layers.layer_norm(sub2 + nor1,
-                                            activation_fn=tf.nn.relu)
-        # NOTE: adding a second skip connection here is not standard but it
-        # might be fun
-        # if tf.shape(query_antecedent)[2] == tf.shape(nor2)[2]:
-            # nor2 = tf.contrib.layers.layer_norm(nor2 + query_antecedent,
-            #                                     activation_fn=tf.nn.relu)
-        return nor2 
-
-    def transformer_decoder_1block(self,
-                            query_antecedent,
-                            logits_bias,
-                            memory_antecedent,
-                            query_mask,
-                            memory_mask,
-                            total_key_depth,
-                            total_value_depth,
-                            output_depth):
-        """
-        # returns [batch, query_antecedent_length, output_depth]
-        """
-        attn = self.multihead_attention(query_antecedent,
-                                        logits_bias,
-                                        memory_antecedent,
-                                        total_key_depth,
-                                        total_value_depth,
-                                        output_depth)
-        # dropout, add, and norm
-        # query_antecedent might not have come in with depth == output_depth
-        # but if so we add a skip connection
-        attn = tf.nn.dropout(attn, self.FLAGS.dropout)
-        if tf.shape(query_antecedent)[2] == tf.shape(attn)[2]:
-            nor1 = tf.contrib.layers.layer_norm(attn + query_antecedent,
-                                            activation_fn=tf.nn.relu)
-        else:
-            nor1 = tf.contrib.layers.layer_norm(attn,
-                                                activation_fn=tf.nn.relu)
-
-        # feed forward twice, without changing shape
-        with tf.variable_scope("ffn"):
-            fc = transformer_ffn_layer(nor1, query_mask, output_depth,
-                                       self.FLAGS.dropout)
-        # dropout, add, and norm
-        sub2 = tf.nn.dropout(fc, self.FLAGS.dropout)
+        sub2 = tf.nn.dropout(fc, self.keep_prob)
         nor2 = tf.contrib.layers.layer_norm(sub2 + nor1,
                                             activation_fn=tf.nn.relu)
         # NOTE: adding a second skip connection here is not standard but it
@@ -498,6 +454,26 @@ class QATransformerModel(object):
                                       total_key_depth,
                                       total_key_depth)
 
+    
+    def context_to_query_attn(c, c_mask, c_bias, qn, qn_mask, qn_bias,
+                              hidden_size, simple=True):
+        if simple:
+            attn_layer = BasicAttn(self.keep_prob,
+                                   self.FLAGS.hidden_size,
+                                   self.FLAGS.hidden_size)
+            _, c = attn_layer.build_graph(qn, qn_mask, c)
+        else:
+            for i in range(self.FLAGS.n_blocks):
+                with tf.variable_scope("block_{}".format(i)) as scope:
+                    c = self.transformer_encoder_block(c,
+                                                       qn_bias,
+                                                       q,
+                                                       context_mask,
+                                                       qn_mask,
+                                                       hidden_size,
+                                                       hidden_size,
+                                                       hidden_size)
+        return c
 
     def build_transformer_b(self,
                                   context_embs,
@@ -530,31 +506,7 @@ class QATransformerModel(object):
         # keys and values come from the encoder output
         # weighted sum of V, based on similarity between Q and K associated
         # query-to-context attention only provides a slight benefit
-        """with tf.variable_scope("question_attends_to_context"):
-            # weighted sum of context, based on question representation, with
-            # the shape of the question
-            for i in range(self.FLAGS.n_blocks):
-                with tf.variable_scope("block_{}".format(i)) as scope:
-                    q = self.transformer_encoder_block(q,
-                                               context_bias,
-                                               c,
-                                               qn_mask,
-                                               context_mask,
-                                               hidden_size,
-                                               hidden_size,
-                                               hidden_size)
-        """
         with tf.variable_scope("context_to_question_attention"):
-            for i in range(self.FLAGS.n_blocks):
-                with tf.variable_scope("block_{}".format(i)) as scope:
-                    a = self.transformer_encoder_block(c,
-                                                       qn_bias,
-                                                       q,
-                                                       context_mask,
-                                                       qn_mask,
-                                                       hidden_size,
-                                                       hidden_size,
-                                                       hidden_size)
        # (batch_size, context_len, hidden_size * 3
         model = tf.concat([c, a, c * a], axis=2) 
         with tf.variable_scope("model_encoder"):
