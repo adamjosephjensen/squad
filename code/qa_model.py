@@ -37,11 +37,7 @@ from data_batcher import get_batch_generator
 from pretty_print import print_example
 from modules import RNNEncoder, SimpleSoftmaxLayer, BasicAttn
 
-print('set up logging')
-logging.basicConfig(level=logging.DEBUG)
-logging.info("Saving to PLEASE WORKK")
-print(logging)
-
+logging.basicConfig(level=logging.INFO)
 
 def shape_list(x):
     """
@@ -556,6 +552,9 @@ class QATransformerModel(object):
 
 
     def build_transformer_b(self):
+        print('allegedly logging')
+        logging.basicConfig(level=logging.DEBUG)
+        logging.info("Saving to PLEASE WORKK")
         logging.info("Saving to PLEASE WORKK")
         hidden_size = self.FLAGS.hidden_size
         hparams = self.transformer_base_v2()
@@ -992,6 +991,7 @@ class QATransformerModel(object):
                 # Sometimes print info to screen
                 if global_step % self.FLAGS.print_every == 0:
                     logging.info('epoch %d, iter %d, loss %.1f, smoothed loss %.2f, grad norm %.3f, param norm %.1f, batch time %.2f' % (epoch, global_step, loss, exp_loss, grad_norm, param_norm, iter_time))
+                    print('epoch %d, iter %d, loss %.1f, smoothed loss %.2f, grad norm %.3f, param norm %.1f, batch time %.2f' % (epoch, global_step, loss, exp_loss, grad_norm, param_norm, iter_time))
 
 
 # Sometimes save model
