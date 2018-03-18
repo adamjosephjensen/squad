@@ -37,8 +37,10 @@ from data_batcher import get_batch_generator
 from pretty_print import print_example
 from modules import RNNEncoder, SimpleSoftmaxLayer, BasicAttn
 
-logging.basicConfig(level=logging.INFO)
-
+print('set up logging')
+logging.basicConfig(level=logging.DEBUG)
+logging.info("Saving to PLEASE WORKK")
+print(logging)
 
 
 def shape_list(x):
@@ -554,6 +556,7 @@ class QATransformerModel(object):
 
 
     def build_transformer_b(self):
+        logging.info("Saving to PLEASE WORKK")
         hidden_size = self.FLAGS.hidden_size
         hparams = self.transformer_base_v2()
         F = self.FLAGS
@@ -609,6 +612,7 @@ class QATransformerModel(object):
         # Apply fully connected layer to each blended representation
         # Note, blended_reps_final corresponds to b' in the handout
         # Note, tf.contrib.layers.fully_connected applies a ReLU non-linarity here by default
+        logging.info("Saving to PLEASE WORKK")
         blended_reps_final = tf.contrib.layers.fully_connected(blended_reps, num_outputs=self.FLAGS.hidden_size) # blended_reps_final is shape (batch_size, context_len, hidden_size)
 
         # Use softmax layer to compute probability distribution for start location
@@ -852,7 +856,7 @@ class QATransformerModel(object):
         return dev_loss
 
 
-    def check_f1_em(self, session, context_path, qn_path, ans_path, dataset, num_samples=100, print_to_screen=False):
+    def check_f1_em(self, session, context_path, qn_path, ans_path, dataset, num_samples=100, print_to_screen=True):
         """
         Sample from the provided (train/dev) set.
         For each sample, calculate F1 and EM score.
@@ -987,9 +991,7 @@ class QATransformerModel(object):
 
                 # Sometimes print info to screen
                 if global_step % self.FLAGS.print_every == 0:
-                    logging.info(
-                        'epoch %d, iter %d, loss %.1f, smoothed loss %.2f, grad norm %.3f, param norm %.1f, batch time %.2f' %
-                        (epoch, global_step, loss, exp_loss, grad_norm, param_norm, iter_time))
+                    logging.info('epoch %d, iter %d, loss %.1f, smoothed loss %.2f, grad norm %.3f, param norm %.1f, batch time %.2f' % (epoch, global_step, loss, exp_loss, grad_norm, param_norm, iter_time))
 
 
 # Sometimes save model

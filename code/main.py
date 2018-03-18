@@ -63,6 +63,9 @@ tf.app.flags.DEFINE_integer("num_heads", 10, "number of heads for attention")
 # How often to print, save, eval
 tf.app.flags.DEFINE_integer("print_every", 1, "How many iterations to do per print.")
 tf.app.flags.DEFINE_integer("save_every", 500, "How many iterations to do per save.")
+print('ew', ('epoch %d, iter %d, loss %.1f, smoothed lo     ss %.2f, grad norm
+             %.3f, param norm %.1f, batch time %.2f' % (epoch, global
+             _step, loss, exp_loss, grad_norm, param_norm, iter_time))
 tf.app.flags.DEFINE_integer("eval_every", 500, "How many iterations to do per calculating loss/f1/em on dev set. Warning: this is fairly time-consuming so don't do it too often.")
 tf.app.flags.DEFINE_integer("keep", 1, "How many checkpoints to keep. 0 indicates keep all (you shouldn't need to do keep all though - it's very storage intensive).")
 
