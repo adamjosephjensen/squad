@@ -25,7 +25,7 @@ import logging
 
 import tensorflow as tf
 
-from qa_model import QAModel
+from qa_model import QAModel, QATransformerModel
 from vocab import get_glove
 from official_eval_helper import get_json_data, generate_answers
 
@@ -45,7 +45,7 @@ tf.app.flags.DEFINE_integer("num_epochs", 0, "Number of epochs to train. 0 means
 
 # Hyperparameters
 #tf.app.ilags.DEFINE_float("learning_rate", 0.001, "Learning rate.")
-tf.app.flags.DEFINE_float("learning_rate", 0.001, "Learning rate.")
+tf.app.flags.DEFINE_float("learning_rate", 0.3, "Learning rate.")
 tf.app.flags.DEFINE_float("max_gradient_norm", 8.0, "Clip gradients to this norm.")
 tf.app.flags.DEFINE_float("dropout", 0.1, "Fraction of units randomly dropped on non-recurrent connections.")
 tf.app.flags.DEFINE_integer("batch_size", 100, "Batch size to use")
@@ -57,8 +57,8 @@ tf.app.flags.DEFINE_integer("question_len", 30, "The maximum question length of 
 tf.app.flags.DEFINE_integer("embedding_size", 100, "Size of the pretrained word vectors. This needs to be one of the available GloVe dimensions: 50/100/200/300")
 # Transformer Network Hparams
 # TODO change to 6
-tf.app.flags.DEFINE_integer("n_blocks", 6, "number of transformer blocks")
-tf.app.flags.DEFINE_integer("n_heads", 10, "number of heads for attention")
+tf.app.flags.DEFINE_integer("num_hidden_layers", 4, "number of transformer blocks")
+tf.app.flags.DEFINE_integer("num_heads", 10, "number of heads for attention")
 
 # How often to print, save, eval
 tf.app.flags.DEFINE_integer("print_every", 1, "How many iterations to do per print.")
@@ -140,8 +140,8 @@ def main(unused_argv):
     dev_ans_path = os.path.join(FLAGS.data_dir, "dev.span")
 
     # Initialize model
-    qa_model = QAModel(FLAGS, id2word, word2id, emb_matrix)
-    # qa_model = QATransformerModel(FLAGS, id2word, word2id, emb_matrix)
+    # qa_model = QAModel(FLAGS, id2word, word2id, emb_matrix)
+    qa_model = QATransformerModel(FLAGS, id2word, word2id, emb_matrix)
 
     # Some GPU settings
     config=tf.ConfigProto()

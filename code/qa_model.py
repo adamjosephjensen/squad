@@ -28,6 +28,9 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.python.ops import variable_scope as vs
 from tensorflow.python.ops import embedding_ops
+from tensor2tensor.models.transformer import TransformerEncoder
+from tensor2tensor.utils import registry
+from tensor2tensor.layers import common_hparams
 
 from evaluate import exact_match_score, f1_score
 from data_batcher import get_batch_generator
@@ -211,10 +214,7 @@ class QATransformerModel(object):
         with tf.variable_scope("QAModel", initializer=init):
             self.add_placeholders()
             self.add_embedding_layer(emb_matrix)
-            self.build_transformer_b(self.context_embs,
-                                                   self.context_mask,
-                                                   self.qn_embs,
-                                                   self.qn_mask)
+            self.build_transformer_b()
             self.add_loss()
 
         # Define trainable parameters, gradient, gradient norm, and clip by gradient norm
@@ -228,9 +228,14 @@ class QATransformerModel(object):
         # (updates is what you need to fetch in session.run to do a gradient update)
         self.global_step = tf.Variable(0, name="global_step", trainable=False)
         # 1 epoch = 640 iters with batch size 100
-        boundaries = [200, 400, 640, 12000]
-        values = [.000001, .00001, .0001, FLAGS.learning_rate * 3, FLAGS.learning_rate]
-        learning_rate = tf.train.piecewise_constant(self.global_step, boundaries, values)
+        start = 0.000001
+        base = FLAGS.learning_rate
+        warmup_steps = 3000
+        slope = (base - start) / warmup_steps
+        pre = slope * tf.cast(self.global_step, tf.float32) + start
+        learning_rate = tf.where(
+            tf.less(tf.cast(self.global_step, tf.int32), warmup_steps),
+            pre, base)
         opt = tf.train.AdamOptimizer(learning_rate=learning_rate) # you can try other optimizers
         self.updates = opt.apply_gradients(zip(clipped_gradients, params), global_step=self.global_step)
 
@@ -342,7 +347,7 @@ class QATransformerModel(object):
     
     def split_heads(self, x, n_heads=None):
         if n_heads == None:
-            n_heads = self.FLAGS.n_heads
+            n_heads = self.FLAGS.num_heads
         # split the last dimension and transpose
         split = self.split_last_dim(x, n_heads)
         out = tf.transpose(split, [0, 2, 1, 3])
@@ -470,7 +475,7 @@ class QATransformerModel(object):
             _, attn_out = attn_layer.build_graph(q, qn_mask, c)
             return attn_out
         elif mode == 'multihead':
-            for i in range(self.FLAGS.n_blocks):
+            for i in range(self.FLAGS.num_hidden_layers):
                 with tf.variable_scope("block_{}".format(i)) as scope:
                     c = self.transformer_encoder_block(c,
                                                        qn_bias,
@@ -485,37 +490,145 @@ class QATransformerModel(object):
              print('must provide a recognized mode')
              assert(0)
 
-    def build_transformer_b(self,
-                                  context_embs,
-                                  context_mask,
-                                  qn_embs,
-                                  qn_mask
-                                 ):
+    def transformer_base_v1(self):
+        """Set of hyperparameters."""
+        hparams = common_hparams.basic_params1()
+        hparams.norm_type = "layer"
+        hparams.hidden_size = 512
+        hparams.batch_size = 4096
+        hparams.max_length = 256
+        hparams.clip_grad_norm = 0.  # i.e. no gradient clipping
+        hparams.optimizer_adam_epsilon = 1e-9
+        hparams.learning_rate_schedule = "legacy"
+        hparams.learning_rate_decay_scheme = "noam"
+        hparams.learning_rate = 0.1
+        hparams.learning_rate_warmup_steps = 4000
+        hparams.initializer_gain = 1.0
+        hparams.num_hidden_layers = 6
+        hparams.initializer = "uniform_unit_scaling"
+        hparams.weight_decay = 0.0
+        hparams.optimizer_adam_beta1 = 0.9
+        hparams.optimizer_adam_beta2 = 0.98
+        hparams.num_sampled_classes = 0
+        hparams.label_smoothing = 0.1
+        hparams.shared_embedding_and_softmax_weights = True
+        hparams.symbol_modality_num_shards = 16
+       
+        # Add new ones like this.
+        hparams.add_hparam("filter_size", 2048)
+        # Layer-related flags. If zero, these fall back on hparams.num_hidden_layers.
+        hparams.add_hparam("num_encoder_layers", 0)
+        hparams.add_hparam("num_decoder_layers", 0)
+        # Attention-related flags.
+        hparams.add_hparam("num_heads", 8)
+        hparams.add_hparam("attention_key_channels", 0)
+        hparams.add_hparam("attention_value_channels", 0)
+        hparams.add_hparam("ffn_layer", "dense_relu_dense")
+        hparams.add_hparam("parameter_attention_key_channels", 0)
+        hparams.add_hparam("parameter_attention_value_channels", 0)
+        # All hyperparameters ending in "dropout" are automatically set to 0.0
+        # when not in training mode.
+        hparams.add_hparam("attention_dropout", 0.0)
+        hparams.add_hparam("attention_dropout_broadcast_dims", "")
+        hparams.add_hparam("relu_dropout", 0.0)
+        hparams.add_hparam("relu_dropout_broadcast_dims", "")
+        hparams.add_hparam("pos", "timing")  # timing, none
+        hparams.add_hparam("nbr_decoder_problems", 1)
+        hparams.add_hparam("proximity_bias", False)
+        hparams.add_hparam("use_pad_remover", True)
+        hparams.add_hparam("self_attention_type", "dot_product")
+        hparams.add_hparam("max_relative_position", 0)
+        return hparams
+
+    def transformer_base_v2(self):
+        """Set of hyperparameters."""
+        hparams = self.transformer_base_v1()
+        hparams.layer_preprocess_sequence = "n"
+        hparams.layer_postprocess_sequence = "da"
+        hparams.layer_prepostprocess_dropout = 0.1
+        hparams.attention_dropout = 0.1
+        hparams.relu_dropout = 0.1
+        hparams.learning_rate_warmup_steps = 8000 #potentially worisome
+        hparams.learning_rate = 0.2
+        return hparams 
+
+
+    def build_transformer_b(self):
         hidden_size = self.FLAGS.hidden_size
+        hparams = self.transformer_base_v2()
+        F = self.FLAGS
+        hparams.batch_size = F.batch_size
+        hparams.hidden_size = F.hidden_size
+        hparams.num_hidden_layers = F.num_hidden_layers
+        hparams.layer_prepostprocess_dropout = F.dropout
+        hparams.attention_dropout = F.dropout
+        hparams.relu_dropout = F.dropout
+        hparams.learning_rate = F.learning_rate
+        hparams.num_heads = F.num_heads
+        #transformer = TransformerEncoder(hparams)
+        """
+        # this I tried but it had 3 million parameters?
         with tf.variable_scope("context_encoder"):
-            context_embs, context_bias = self.prepare_encoder(context_embs,
+            context_embs = tf.expand_dims(self.context_embs, 2)
+            context_hiddens, _ = transformer.encode(context_embs, 1, hparams)
+        with tf.variable_scope("question_encoder"):
+            qn_embs = tf.expand_dims(self.qn_embs, 2)
+            question_hiddens, _ = transformer.encode(qn_embs, 2, hparams)
+        """
+        with tf.variable_scope("context_encoder"):
+            # TODO replace with tensor2tensor
+            context_hiddens, context_bias = self.prepare_encoder(self.context_embs,
                                                           hidden_size,
-                                                          context_mask)
-            for i in range(self.FLAGS.n_blocks):
+                                                          self.context_mask)
+            for i in range(self.FLAGS.num_hidden_layers):
                 with tf.variable_scope("block_{}".format(i)) as scope:
-                    c = self.transformer_enc_block(context_embs,
+                    context_hiddens = self.transformer_enc_block(context_hiddens,
                                                    context_bias,
-                                                   context_mask,
+                                                   self.context_mask,
                                                    hidden_size)
 
         with tf.variable_scope("question_encoder"):
-            qn_embs, qn_bias = self.prepare_encoder(qn_embs, hidden_size, qn_mask)
-            for i in range(self.FLAGS.n_blocks):
+            question_hiddens, qn_bias = self.prepare_encoder(self.qn_embs, hidden_size,
+                                                    self.qn_mask)
+            for i in range(self.FLAGS.num_hidden_layers):
                 with tf.variable_scope("block_{}".format(i)) as scope:
-                    q = self.transformer_enc_block(qn_embs,
+                    question_hiddens = self.transformer_enc_block(question_hiddens,
                                                    qn_bias,
-                                                   qn_mask,
+                                                   self.qn_mask,
                                                    hidden_size)
+        #"""
+
+        # Use context hidden states to attend to question hidden states
+        attn_layer = BasicAttn(self.keep_prob, self.FLAGS.hidden_size, self.FLAGS.hidden_size)
+        _, attn_output = attn_layer.build_graph(question_hiddens,
+                                                self.qn_mask, context_hiddens) # attn_output is shape (batch_size, context_len, hidden_size*2)
+
+        # Concat attn_output to context_hiddens to get blended_reps
+        blended_reps = tf.concat([context_hiddens, attn_output], axis=2) # (batch_size, context_len, hidden_size*4)
+
+        # Apply fully connected layer to each blended representation
+        # Note, blended_reps_final corresponds to b' in the handout
+        # Note, tf.contrib.layers.fully_connected applies a ReLU non-linarity here by default
+        blended_reps_final = tf.contrib.layers.fully_connected(blended_reps, num_outputs=self.FLAGS.hidden_size) # blended_reps_final is shape (batch_size, context_len, hidden_size)
+
+        # Use softmax layer to compute probability distribution for start location
+        # Note this produces self.logits_start and self.probdist_start, both of which have shape (batch_size, context_len)
+        with vs.variable_scope("StartDist"):
+            softmax_layer_start = SimpleSoftmaxLayer()
+            self.logits_start, self.probdist_start = softmax_layer_start.build_graph(blended_reps_final, self.context_mask)
+
+        # Use softmax layer to compute probability distribution for end location
+        # Note this produces self.logits_end and self.probdist_end, both of which have shape (batch_size, context_len)
+        with vs.variable_scope("EndDist"):
+            softmax_layer_end = SimpleSoftmaxLayer()
+            self.logits_end, self.probdist_end = softmax_layer_end.build_graph(blended_reps_final, self.context_mask)
 
         # attention where queries come from previous layer and
         # keys and values come from the encoder output
         # weighted sum of V, based on similarity between Q and K associated
         # query-to-context attention only provides a slight benefit
+        """
+        SOME STUFF I TRIED THAT DID NOT WORK WELL:
         with tf.variable_scope("context_to_question_attention"):
             a = self.context_to_query_attn(c,
                                            context_mask,
@@ -553,26 +666,7 @@ class QATransformerModel(object):
             _1_3 = tf.concat([_1, _3], axis=2)
             softmax_layer_end = SimpleSoftmaxLayer()
             self.logits_end, self.probdist_end = softmax_layer_end.build_graph(_1_3, self.context_mask)
-
-
-
-    def blended_to_output(self, blended_reps_final):
         """
-        Use softmax layer to compute probability distribution for start location
-        Note this produces self.logits_start and self.probdist_start, both of which have shape (batch_size, context_len)
-        """
-        with vs.variable_scope("StartDist"):
-            softmax_layer_start = SimpleSoftmaxLayer()
-            self.logits_start, self.probdist_start = softmax_layer_start.build_graph(blended_reps_final, self.context_mask)
-
-        # Use softmax layer to compute probability distribution for end location
-        # Note this produces self.logits_end and self.probdist_end, both of which have shape (batch_size, context_len)
-        with vs.variable_scope("EndDist"):
-            softmax_layer_end = SimpleSoftmaxLayer()
-            self.logits_end, self.probdist_end = softmax_layer_end.build_graph(blended_reps_final, self.context_mask)
-
-        print('probdist_start: {}'.format(self.probdist_start))
-        print('probdist_end: {}'.format(self.probdist_end))
 
 
     def add_loss(self):
@@ -1116,7 +1210,7 @@ class QAModel(object):
         """
         # Match up our input data with the placeholders
         input_feed = {}
-        input_feed[self.context_ids] = batch.context_iids
+        input_feed[self.context_ids] = batch.context_ids
         input_feed[self.context_mask] = batch.context_mask
         input_feed[self.qn_ids] = batch.qn_ids
         input_feed[self.qn_mask] = batch.qn_mask
