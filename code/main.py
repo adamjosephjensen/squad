@@ -30,7 +30,9 @@ from vocab import get_glove
 from official_eval_helper import get_json_data, generate_answers
 
 
+print('setting up logging')
 logging.basicConfig(level=logging.INFO)
+print(logging, logging.getLogger())
 
 MAIN_DIR = os.path.relpath(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) # relative path of the main directory
 DEFAULT_DATA_DIR = os.path.join(MAIN_DIR, "data") # relative path of data dir
@@ -45,7 +47,7 @@ tf.app.flags.DEFINE_integer("num_epochs", 0, "Number of epochs to train. 0 means
 
 # Hyperparameters
 #tf.app.ilags.DEFINE_float("learning_rate", 0.001, "Learning rate.")
-tf.app.flags.DEFINE_float("learning_rate", 0.3, "Learning rate.")
+tf.app.flags.DEFINE_float("learning_rate", 0.2, "Learning rate.")
 tf.app.flags.DEFINE_float("max_gradient_norm", 8.0, "Clip gradients to this norm.")
 tf.app.flags.DEFINE_float("dropout", 0.1, "Fraction of units randomly dropped on non-recurrent connections.")
 tf.app.flags.DEFINE_integer("batch_size", 100, "Batch size to use")
@@ -143,6 +145,7 @@ def main(unused_argv):
     # qa_model = QAModel(FLAGS, id2word, word2id, emb_matrix)
     qa_model = QATransformerModel(FLAGS, id2word, word2id, emb_matrix)
 
+    print('qa_model created:', qa_model)
     # Some GPU settings
     config=tf.ConfigProto()
     config.gpu_options.allow_growth = True
@@ -155,6 +158,8 @@ def main(unused_argv):
             os.makedirs(FLAGS.train_dir)
         file_handler = logging.FileHandler(os.path.join(FLAGS.train_dir, "log.txt"))
         logging.getLogger().addHandler(file_handler)
+        print('logger-file created', logging.getLogger())
+        logging.info('logger info works????')
 
         # Save a record of flags as a .json file in train_dir
         with open(os.path.join(FLAGS.train_dir, "flags.json"), 'w') as fout:

@@ -31,6 +31,7 @@ from tensorflow.python.ops import embedding_ops
 from tensor2tensor.models.transformer import TransformerEncoder
 from tensor2tensor.utils import registry
 from tensor2tensor.layers import common_hparams
+#from tensor2tensor.data_generators.problem import 
 
 from evaluate import exact_match_score, f1_score
 from data_batcher import get_batch_generator
@@ -226,9 +227,9 @@ class QATransformerModel(object):
         # (updates is what you need to fetch in session.run to do a gradient update)
         self.global_step = tf.Variable(0, name="global_step", trainable=False)
         # 1 epoch = 640 iters with batch size 100
-        start = 0.000001
+        start = 0
         base = FLAGS.learning_rate
-        warmup_steps = 3000
+        warmup_steps = 6000
         slope = (base - start) / warmup_steps
         pre = slope * tf.cast(self.global_step, tf.float32) + start
         learning_rate = tf.where(
@@ -240,6 +241,7 @@ class QATransformerModel(object):
         # Define savers (for checkpointing) and summaries (for tensorboard)
         self.saver = tf.train.Saver(tf.global_variables(), max_to_keep=FLAGS.keep)
         self.bestmodel_saver = tf.train.Saver(tf.global_variables(), max_to_keep=1)
+        print " DONE Initializing the transformer-based QAModel..."
         self.summaries = tf.summary.merge_all()
 
 
@@ -513,7 +515,7 @@ class QATransformerModel(object):
         hparams.symbol_modality_num_shards = 16
        
         # Add new ones like this.
-        hparams.add_hparam("filter_size", 2048)
+        hparams.filter_size = 2048
         # Layer-related flags. If zero, these fall back on hparams.num_hidden_layers.
         hparams.add_hparam("num_encoder_layers", 0)
         hparams.add_hparam("num_decoder_layers", 0)
@@ -531,7 +533,6 @@ class QATransformerModel(object):
         hparams.add_hparam("relu_dropout", 0.0)
         hparams.add_hparam("relu_dropout_broadcast_dims", "")
         hparams.add_hparam("pos", "timing")  # timing, none
-        hparams.add_hparam("nbr_decoder_problems", 1)
         hparams.add_hparam("proximity_bias", False)
         hparams.add_hparam("use_pad_remover", True)
         hparams.add_hparam("self_attention_type", "dot_product")
@@ -552,14 +553,15 @@ class QATransformerModel(object):
 
 
     def build_transformer_b(self):
-        print('allegedly logging')
-        logging.basicConfig(level=logging.DEBUG)
-        logging.info("Saving to PLEASE WORKK")
         logging.info("Saving to PLEASE WORKK")
         hidden_size = self.FLAGS.hidden_size
         hparams = self.transformer_base_v2()
         F = self.FLAGS
         hparams.batch_size = F.batch_size
+        #
+        hparams.max_length = F.context_len
+        #
+        hparams.filter_size = F.hidden_size #maybe this should be higher?
         hparams.hidden_size = F.hidden_size
         hparams.num_hidden_layers = F.num_hidden_layers
         hparams.layer_prepostprocess_dropout = F.dropout
@@ -567,15 +569,26 @@ class QATransformerModel(object):
         hparams.relu_dropout = F.dropout
         hparams.learning_rate = F.learning_rate
         hparams.num_heads = F.num_heads
-        #transformer = TransformerEncoder(hparams)
-        """
-        # this I tried but it had 3 million parameters?
+        transformer = TransformerEncoder(hparams)
+
+        print('transformer created')
+        EN_TOK = tf.constant(3, dtype=tf.int32)
+        # this I tried with the normal transformer model but it had 3 million parameters?
         with tf.variable_scope("context_encoder"):
             context_embs = tf.expand_dims(self.context_embs, 2)
-            context_hiddens, _ = transformer.encode(context_embs, 1, hparams)
+            features = {"inputs": context_embs, "target_space_id": EN_TOK}
+            print('in int.body')
+            context_hiddens = transformer.body(features)
+            print('out t.body')
+            context_hiddens = tf.squeeze(context_hiddens, 2)
+
+        hparams.max_length = F.question_len
+        transformer = TransformerEncoder(hparams)
         with tf.variable_scope("question_encoder"):
             qn_embs = tf.expand_dims(self.qn_embs, 2)
-            question_hiddens, _ = transformer.encode(qn_embs, 2, hparams)
+            features = {"inputs": qn_embs, "target_space_id": EN_TOK}
+            question_hiddens = transformer.body(features)
+            question_hiddens = tf.squeeze(question_hiddens, 2)
         """
         with tf.variable_scope("context_encoder"):
             # TODO replace with tensor2tensor
@@ -598,14 +611,16 @@ class QATransformerModel(object):
                                                    qn_bias,
                                                    self.qn_mask,
                                                    hidden_size)
-        #"""
+        """
 
         # Use context hidden states to attend to question hidden states
+        print('attn_layer')
         attn_layer = BasicAttn(self.keep_prob, self.FLAGS.hidden_size, self.FLAGS.hidden_size)
         _, attn_output = attn_layer.build_graph(question_hiddens,
                                                 self.qn_mask, context_hiddens) # attn_output is shape (batch_size, context_len, hidden_size*2)
 
         # Concat attn_output to context_hiddens to get blended_reps
+        print('blended_reps')
         blended_reps = tf.concat([context_hiddens, attn_output], axis=2) # (batch_size, context_len, hidden_size*4)
 
         # Apply fully connected layer to each blended representation
@@ -618,6 +633,7 @@ class QATransformerModel(object):
         # Note this produces self.logits_start and self.probdist_start, both of which have shape (batch_size, context_len)
         with vs.variable_scope("StartDist"):
             softmax_layer_start = SimpleSoftmaxLayer()
+            print('building graphs for output')
             self.logits_start, self.probdist_start = softmax_layer_start.build_graph(blended_reps_final, self.context_mask)
 
         # Use softmax layer to compute probability distribution for end location
@@ -625,6 +641,7 @@ class QATransformerModel(object):
         with vs.variable_scope("EndDist"):
             softmax_layer_end = SimpleSoftmaxLayer()
             self.logits_end, self.probdist_end = softmax_layer_end.build_graph(blended_reps_final, self.context_mask)
+            print('building graphs for output')
 
         # attention where queries come from previous layer and
         # keys and values come from the encoder output
@@ -950,6 +967,9 @@ class QATransformerModel(object):
         params = tf.trainable_variables()
         num_params = sum(map(lambda t: np.prod(tf.shape(t.value()).eval()), params))
         toc = time.time()
+        log = logging.getLogger()
+        log.setLevel(logging.INFO)
+        print('please work')
         logging.info("Number of params: %d (retrieval took %f secs)" % (num_params, toc - tic))
 
         # We will keep track of exponentially-smoothed loss
@@ -991,7 +1011,7 @@ class QATransformerModel(object):
                 # Sometimes print info to screen
                 if global_step % self.FLAGS.print_every == 0:
                     logging.info('epoch %d, iter %d, loss %.1f, smoothed loss %.2f, grad norm %.3f, param norm %.1f, batch time %.2f' % (epoch, global_step, loss, exp_loss, grad_norm, param_norm, iter_time))
-                    print('epoch %d, iter %d, loss %.1f, smoothed loss %.2f, grad norm %.3f, param norm %.1f, batch time %.2f' % (epoch, global_step, loss, exp_loss, grad_norm, param_norm, iter_time))
+                    logging.warn('WARN: epoch %d, iter %d, loss %.1f, smoothed loss %.2f, grad norm %.3f, param norm %.1f, batch time %.2f' % (epoch, global_step, loss, exp_loss, grad_norm, param_norm, iter_time))
 
 
 # Sometimes save model
@@ -1004,20 +1024,20 @@ class QATransformerModel(object):
 
                     # Get loss for entire dev set and log to tensorboard
                     dev_loss = self.get_dev_loss(session, dev_context_path, dev_qn_path, dev_ans_path)
-                    logging.info("Epoch %d, Iter %d, dev loss: %f" % (epoch, global_step, dev_loss))
+                    logging.warn("Epoch %d, Iter %d, dev loss: %f" % (epoch, global_step, dev_loss))
                     write_summary(dev_loss, "dev/loss", summary_writer, global_step)
 
 
                     # Get F1/EM on train set and log to tensorboard
                     train_f1, train_em = self.check_f1_em(session, train_context_path, train_qn_path, train_ans_path, "train", num_samples=1000)
-                    logging.info("Epoch %d, Iter %d, Train F1 score: %f, Train EM score: %f" % (epoch, global_step, train_f1, train_em))
+                    logging.warn("Epoch %d, Iter %d, Train F1 score: %f, Train EM score: %f" % (epoch, global_step, train_f1, train_em))
                     write_summary(train_f1, "train/F1", summary_writer, global_step)
                     write_summary(train_em, "train/EM", summary_writer, global_step)
 
 
                     # Get F1/EM on dev set and log to tensorboard
                     dev_f1, dev_em = self.check_f1_em(session, dev_context_path, dev_qn_path, dev_ans_path, "dev", num_samples=0)
-                    logging.info("Epoch %d, Iter %d, Dev F1 score: %f, Dev EM score: %f" % (epoch, global_step, dev_f1, dev_em))
+                    logging.warn("Epoch %d, Iter %d, Dev F1 score: %f, Dev EM score: %f" % (epoch, global_step, dev_f1, dev_em))
                     write_summary(dev_f1, "dev/F1", summary_writer, global_step)
                     write_summary(dev_em, "dev/EM", summary_writer, global_step)
 
@@ -1025,12 +1045,12 @@ class QATransformerModel(object):
                     # Early stopping based on dev EM. You could switch this to use F1 instead.
                     if best_dev_em is None or dev_em > best_dev_em:
                         best_dev_em = dev_em
-                        logging.info("Saving to %s..." % bestmodel_ckpt_path)
+                        logging.warn("Saving to %s..." % bestmodel_ckpt_path)
                         self.bestmodel_saver.save(session, bestmodel_ckpt_path, global_step=global_step)
 
 
             epoch_toc = time.time()
-            logging.info("End of epoch %i. Time for epoch: %f" % (epoch, epoch_toc-epoch_tic))
+            logging.warn("End of epoch %i. Time for epoch: %f" % (epoch, epoch_toc-epoch_tic))
 
         sys.stdout.flush()
 
@@ -1314,7 +1334,7 @@ class QAModel(object):
         Outputs:
           dev_loss: float. Average loss across the dev set.
         """
-        logging.info("Calculating dev loss...")
+        logging.warn("Calculating dev loss...")
         tic = time.time()
         loss_per_batch, batch_lengths = [], []
 
@@ -1368,7 +1388,7 @@ class QAModel(object):
         Returns:
           F1 and EM: Scalars. The average across the sampled examples.
         """
-        logging.info("Calculating F1/EM for %s examples in %s set..." % (str(num_samples) if num_samples != 0 else "all", dataset))
+        logging.warn("Calculating F1/EM for %s examples in %s set..." % (str(num_samples) if num_samples != 0 else "all", dataset))
 
         f1_total = 0.
         em_total = 0.
@@ -1418,7 +1438,7 @@ class QAModel(object):
         em_total /= example_num
 
         toc = time.time()
-        logging.info("Calculating F1/EM for %i examples in %s set took %.2f seconds" % (example_num, dataset, toc-tic))
+        logging.warn("Calculating F1/EM for %i examples in %s set took %.2f seconds" % (example_num, dataset, toc-tic))
 
         return f1_total, em_total
 
@@ -1437,7 +1457,7 @@ class QAModel(object):
         params = tf.trainable_variables()
         num_params = sum(map(lambda t: np.prod(tf.shape(t.value()).eval()), params))
         toc = time.time()
-        logging.info("Number of params: %d (retrieval took %f secs)" % (num_params, toc - tic))
+        logging.warn("Number of params: %d (retrieval took %f secs)" % (num_params, toc - tic))
 
         # We will keep track of exponentially-smoothed loss
         exp_loss = None
@@ -1455,7 +1475,7 @@ class QAModel(object):
 
         epoch = 0
 
-        logging.info("Beginning training loop...")
+        logging.warn("Beginning training loop...")
         while self.FLAGS.num_epochs == 0 or epoch < self.FLAGS.num_epochs:
             epoch += 1
             epoch_tic = time.time()
