@@ -5,4 +5,5 @@ six==1.11.0
 tensorflow-gpu==1.4.1
 #tensorflow==1.4.1 #if you need to run CPU-only tensorflow (e.g. on your laptop)
 tensorflow-tensorboard==0.4.0
+tensor2tensor[tensorflow_gpu]
 tqdm==4.19.5
