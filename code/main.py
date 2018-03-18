@@ -140,8 +140,8 @@ def main(unused_argv):
     dev_ans_path = os.path.join(FLAGS.data_dir, "dev.span")
 
     # Initialize model
-    # baselineqa_model = QAModel(FLAGS, id2word, word2id, emb_matrix)
-    qa_model = QATransformerModel(FLAGS, id2word, word2id, emb_matrix)
+    baselineqa_model = QAModel(FLAGS, id2word, word2id, emb_matrix)
+    # qa_model = QATransformerModel(FLAGS, id2word, word2id, emb_matrix)
 
     # Some GPU settings
     config=tf.ConfigProto()
